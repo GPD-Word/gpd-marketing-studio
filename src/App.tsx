@@ -1,0 +1,879 @@
+import { useEffect, useMemo, useState } from "react";
+import {
+  ArrowRight, Bell, CalendarDays, Check, CircleHelp, Clock3, Facebook, FileImage,
+  HeartHandshake, ImagePlus, Instagram, LoaderCircle, LockKeyhole, LogOut,
+  MessageCircle, Plus, Send, Settings2, Sparkles, Target, Video, X,
+} from "lucide-react";
+import {
+  api,
+  API_URL,
+  type AIProviderConfig,
+  type Campaign,
+  type CloudinaryUploadIntent,
+  type CloudinaryUploadResult,
+  type LLMProvider,
+  type MarketingAsset,
+  type PageProfile,
+  type Platform,
+  type ScheduledPost,
+  type SocialAccount,
+} from "./api";
+
+const strategyOptions = [
+  ["awareness", "Awareness"],
+  ["consideration", "Consideration"],
+  ["conversion", "Conversion"],
+  ["retention", "Retention"],
+  ["advocacy", "Advocacy"],
+  ["education", "Education"],
+  ["product-launch", "Product launch"],
+  ["community", "Community"],
+] as const;
+
+const platforms: { id: Platform; label: string; icon: typeof Facebook }[] = [
+  { id: "facebook", label: "Facebook", icon: Facebook },
+  { id: "instagram", label: "Instagram", icon: Instagram },
+  { id: "x", label: "X", icon: X },
+  { id: "tiktok", label: "TikTok", icon: Video },
+];
+
+type AuthResponse = { access_token: string; expires_in: number };
+type View = "overview" | "channels" | "campaigns" | "assets";
+type ProviderFormRow = { provider: LLMProvider; model: string; api_key: string; priority: number };
+
+async function uploadToCloudinary(source: File | string, intent: CloudinaryUploadIntent): Promise<CloudinaryUploadResult> {
+  const form = new FormData();
+  form.set("file", source);
+  form.set("api_key", intent.api_key);
+  form.set("allowed_formats", intent.allowed_formats);
+  form.set("timestamp", String(intent.timestamp));
+  form.set("public_id", intent.public_id);
+  form.set("type", intent.type);
+  form.set("overwrite", intent.overwrite);
+  form.set("signature", intent.signature);
+  const response = await fetch(
+    `https://api.cloudinary.com/v1_1/${encodeURIComponent(intent.cloud_name)}/${intent.resource_type}/upload`,
+    { method: "POST", body: form },
+  );
+  const result = await response.json().catch(() => undefined) as
+    | (CloudinaryUploadResult & { error?: { message?: string } })
+    | undefined;
+  if (!response.ok || !result?.public_id || !result.version || !result.signature || !result.resource_type) {
+    throw new Error(result?.error?.message || `Cloudinary upload failed (${response.status}).`);
+  }
+  return result;
+}
+
+const providerOptions: { id: LLMProvider; label: string; model: string }[] = [
+  { id: "gemini", label: "Google Gemini", model: "gemini-2.5-flash" },
+  { id: "openai", label: "OpenAI", model: "gpt-4.1-mini" },
+  { id: "anthropic", label: "Anthropic", model: "claude-3-7-sonnet-latest" },
+  { id: "openrouter", label: "OpenRouter", model: "openrouter/auto" },
+  { id: "groq", label: "Groq", model: "llama-3.3-70b-versatile" },
+];
+
+export default function App() {
+  const [token, setToken] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [apiHealth, setApiHealth] = useState<"checking" | "healthy" | "unavailable">("checking");
+  const [accounts, setAccounts] = useState<SocialAccount[]>([]);
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [assets, setAssets] = useState<MarketingAsset[]>([]);
+  const [view, setView] = useState<View>("overview");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [showAccountForm, setShowAccountForm] = useState(false);
+  const [showCampaignForm, setShowCampaignForm] = useState(false);
+  const [profileAccount, setProfileAccount] = useState<SocialAccount | null>(null);
+  const [profileDraft, setProfileDraft] = useState<PageProfile | null>(null);
+  const [tiktokSetupAccount, setTikTokSetupAccount] = useState<SocialAccount | null>(null);
+  const [tiktokSession, setTikTokSession] = useState<{ connected: boolean; expires_at: string | null } | null>(null);
+  const [scheduleCampaign, setScheduleCampaign] = useState<Campaign | null>(null);
+  const [postsCampaign, setPostsCampaign] = useState<Campaign | null>(null);
+  const [campaignPosts, setCampaignPosts] = useState<ScheduledPost[]>([]);
+  const [scheduleForm, setScheduleForm] = useState({
+    account_id: "",
+    asset_id: "",
+    text: "",
+    scheduled_at: "",
+  });
+  const [aiAccountId, setAiAccountId] = useState<string | null>(null);
+  const [aiProviderRows, setAIProviderRows] = useState<ProviderFormRow[]>([]);
+  const [savedAIProviders, setSavedAIProviders] = useState<AIProviderConfig[]>([]);
+  const [assetFile, setAssetFile] = useState<File | null>(null);
+  const [assetUrl, setAssetUrl] = useState("");
+  const [account, setAccount] = useState({
+    platform: "facebook" as Platform,
+    display_name: "",
+    external_id: "",
+    credentials: "",
+    expires_at: "",
+  });
+  const [campaign, setCampaign] = useState({
+    name: "",
+    objective: "",
+    strategies: ["awareness"] as string[],
+    tone: "Warm and helpful",
+    geography: '{"countries":[],"regions":[],"cities":[]}',
+    starts_at: "",
+    ends_at: "",
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+    account_ids: [] as string[],
+    schedule_mode: "auto" as "auto" | "specific_times",
+    specific_times: "10:00, 16:00",
+    latitude: "",
+    longitude: "",
+    faith_guidance: true,
+  });
+
+  const channelCount = useMemo(() => new Set(accounts.map((item) => item.platform)).size, [accounts]);
+
+  async function refreshData(activeToken: string) {
+    const [nextAccounts, nextCampaigns, nextAssets] = await Promise.all([
+      api<SocialAccount[]>("/api/accounts", activeToken),
+      api<Campaign[]>("/api/campaigns", activeToken),
+      api<MarketingAsset[]>("/api/assets", activeToken),
+    ]);
+    setAccounts(nextAccounts);
+    setCampaigns(nextCampaigns);
+    setAssets(nextAssets);
+  }
+
+  useEffect(() => {
+    if (!token) return;
+    refreshData(token).catch((cause: Error) => setError(cause.message));
+  }, [token]);
+
+  useEffect(() => {
+    let active = true;
+    async function checkHealth() {
+      try {
+        await api<{ status: string }>("/health");
+        if (active) setApiHealth("healthy");
+      } catch {
+        if (active) setApiHealth("unavailable");
+      }
+    }
+    void checkHealth();
+    const timer = window.setInterval(checkHealth, 30000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
+
+  async function authenticate(event: React.FormEvent) {
+    event.preventDefault();
+    setAuthBusy(true);
+    setAuthError("");
+    try {
+      const result = await api<AuthResponse>(`/api/auth/${authMode}`, undefined, {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+      });
+      setToken(result.access_token);
+      setPassword("");
+    } catch (cause) {
+      setAuthError((cause as Error).message);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function saveAccount(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      let credentials: Record<string, string> = {};
+      if (account.platform !== "tiktok") {
+        try {
+          credentials = JSON.parse(account.credentials) as Record<string, string>;
+        } catch {
+          throw new Error('Enter credentials as JSON, e.g. {"access_token":"…"}');
+        }
+      }
+      const created = await api<SocialAccount>("/api/accounts", token, {
+        method: "POST",
+        body: JSON.stringify({
+          platform: account.platform,
+          display_name: account.display_name,
+          external_id: account.external_id,
+          credentials,
+          expires_at: account.expires_at ? new Date(account.expires_at).toISOString() : null,
+        }),
+      });
+      await refreshData(token);
+      setShowAccountForm(false);
+      setAccount({ platform: "facebook", display_name: "", external_id: "", credentials: "", expires_at: "" });
+      setMessage("Channel saved. Configure at least one page-specific AI provider before creating campaigns.");
+      await openAISettings(created.id);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openAISettings(accountId: string) {
+    setError("");
+    setMessage("");
+    try {
+      const configured = await api<AIProviderConfig[]>(`/api/accounts/${accountId}/ai-providers`, token);
+      setSavedAIProviders(configured);
+      setAIProviderRows(configured.length
+        ? configured.map(({ provider, model, priority }) => ({ provider, model, priority, api_key: "" }))
+        : [{ provider: "gemini", model: "gemini-2.5-flash", priority: 1, api_key: "" }]);
+      setAiAccountId(accountId);
+    } catch (cause) {
+      setError((cause as Error).message);
+    }
+  }
+
+  function addAIProvider() {
+    const available = providerOptions.find((option) => !aiProviderRows.some((row) => row.provider === option.id));
+    if (!available) {
+      setError("All supported providers are already configured for this page.");
+      return;
+    }
+    setAIProviderRows((rows) => [...rows, {
+      provider: available.id,
+      model: available.model,
+      priority: rows.length + 1,
+      api_key: "",
+    }]);
+    setError("");
+  }
+
+  async function saveAISettings(event: React.FormEvent) {
+    event.preventDefault();
+    if (!aiAccountId || aiProviderRows.length === 0) {
+      setError("Keep at least one verified AI provider configured for this page.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const remaining = new Set(aiProviderRows.map((row) => row.provider));
+      for (const saved of savedAIProviders) {
+        if (!remaining.has(saved.provider)) {
+          await api(`/api/accounts/${aiAccountId}/ai-providers/${saved.provider}`, token, { method: "DELETE" });
+        }
+      }
+      for (const row of aiProviderRows) {
+        await api<AIProviderConfig>(`/api/accounts/${aiAccountId}/ai-providers/${row.provider}`, token, {
+          method: "PUT",
+          body: JSON.stringify({
+            model: row.model,
+            priority: row.priority,
+            ...(row.api_key ? { api_key: row.api_key } : {}),
+          }),
+        });
+      }
+      setSavedAIProviders(await api<AIProviderConfig[]>(`/api/accounts/${aiAccountId}/ai-providers`, token));
+      setAIProviderRows((rows) => rows.map((row) => ({ ...row, api_key: "" })));
+      setAiAccountId(null);
+      setMessage("Provider keys verified and saved encrypted for this page. They are never sent to Hugging Face.");
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openProfileSettings(item: SocialAccount) {
+    setProfileAccount(item);
+    setProfileDraft(item.profile);
+  }
+
+  async function openTikTokSetup(item: SocialAccount) {
+    setTikTokSetupAccount(item);
+    setTikTokSession(null);
+    setError("");
+    try {
+      setTikTokSession(await api<{ connected: boolean; expires_at: string | null }>(
+        `/api/accounts/${item.id}/browser-session`,
+        token,
+      ));
+    } catch (cause) {
+      setError((cause as Error).message);
+    }
+  }
+
+  async function saveProfileSettings(event: React.FormEvent) {
+    event.preventDefault();
+    if (!profileAccount || !profileDraft) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api<SocialAccount>(`/api/accounts/${profileAccount.id}/profile`, token, {
+        method: "PUT",
+        body: JSON.stringify(profileDraft),
+      });
+      await refreshData(token);
+      setProfileAccount(null);
+      setProfileDraft(null);
+      setMessage("Page language, brand kit, and faith-presentation preferences saved.");
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveCampaign(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const geography = JSON.parse(campaign.geography) as Record<string, unknown>;
+      const specificTimes = campaign.specific_times
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      await api("/api/campaigns", token, {
+        method: "POST",
+        body: JSON.stringify({
+          name: campaign.name,
+          objective: campaign.objective,
+          strategies: campaign.strategies,
+          tone: campaign.tone,
+          geography,
+          starts_at: new Date(campaign.starts_at).toISOString(),
+          ends_at: new Date(campaign.ends_at).toISOString(),
+          timezone: campaign.timezone,
+          account_ids: campaign.account_ids,
+          planning_preferences: {
+            schedule_mode: campaign.schedule_mode,
+            specific_times: campaign.schedule_mode === "specific_times" ? specificTimes : [],
+            latitude: campaign.latitude.trim() ? Number(campaign.latitude) : null,
+            longitude: campaign.longitude.trim() ? Number(campaign.longitude) : null,
+            faith_guidance: campaign.faith_guidance,
+          },
+        }),
+      });
+      await refreshData(token);
+      setShowCampaignForm(false);
+      setMessage("Campaign saved. Schedule approved posts for its selected channels.");
+    } catch (cause) {
+      setError((cause as Error).message || "Campaign could not be saved.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openScheduleForm(item: Campaign) {
+    const firstAccount = item.account_ids[0] ?? "";
+    const date = new Date(item.starts_at);
+    date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+    setScheduleForm({
+      account_id: firstAccount,
+      asset_id: "",
+      text: "",
+      scheduled_at: date.toISOString().slice(0, 16),
+    });
+    setScheduleCampaign(item);
+    setError("");
+  }
+
+  async function generateCampaignPlan(item: Campaign) {
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await api<{ posts_created: number; days_planned: number; news_headlines_used: number }>(
+        `/api/campaigns/${item.id}/generate-plan`,
+        token,
+        { method: "POST", body: JSON.stringify({ days: 7, offset_days: 0 }) },
+      );
+      await refreshData(token);
+      setMessage(`AI chose a ${result.posts_created}-post cadence across ${result.days_planned} days; ${result.news_headlines_used} news headlines were available. Review each post before publishing.`);
+      await openCampaignPosts(item);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openCampaignPosts(item: Campaign) {
+    setError("");
+    try {
+      const posts = await api<ScheduledPost[]>(`/api/campaigns/${item.id}/posts`, token);
+      setCampaignPosts(posts);
+      setPostsCampaign(item);
+    } catch (cause) {
+      setError((cause as Error).message);
+    }
+  }
+
+  async function approvePost(post: ScheduledPost) {
+    if (!postsCampaign) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/api/campaigns/${postsCampaign.id}/posts/${post.id}/approve`, token, { method: "POST" });
+      setCampaignPosts(await api<ScheduledPost[]>(`/api/campaigns/${postsCampaign.id}/posts`, token));
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removePost(post: ScheduledPost) {
+    if (!postsCampaign) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/api/campaigns/${postsCampaign.id}/posts/${post.id}`, token, { method: "DELETE" });
+      setCampaignPosts((items) => items.filter((item) => item.id !== post.id));
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function generateScheduledCopy() {
+    if (!scheduleCampaign || !scheduleForm.account_id) {
+      setError("Choose a campaign channel before generating copy.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const channel = accounts.find((item) => item.id === scheduleForm.account_id);
+      const asset = assets.find((item) => item.id === scheduleForm.asset_id);
+      const result = await api<{ text: string; provider: LLMProvider; model: string }>(
+        `/api/accounts/${scheduleForm.account_id}/ai/generate`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            prompt: [
+              `Write a social post for ${channel?.platform ?? "this page"}.`,
+              `Campaign: ${scheduleCampaign.name}.`,
+              `Objective: ${scheduleCampaign.objective}.`,
+              `Marketing strategies: ${scheduleCampaign.strategies.join(", ")}.`,
+              `Page voice: ${scheduleCampaign.tone}.`,
+              asset ? `Use this asset context: ${asset.description}. Labels: ${asset.labels.join(", ")}.` : "",
+              "Use only facts in the brief, avoid unsupported claims, keep it natural, and return only the post copy.",
+            ].filter(Boolean).join("\n"),
+          }),
+        },
+      );
+      setScheduleForm((form) => ({ ...form, text: result.text }));
+      setMessage(`Copy generated with ${result.provider} (${result.model}); review it before scheduling.`);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveScheduledPost(event: React.FormEvent) {
+    event.preventDefault();
+    if (!scheduleCampaign) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/api/campaigns/${scheduleCampaign.id}/posts`, token, {
+        method: "POST",
+        body: JSON.stringify({
+          ...scheduleForm,
+          asset_id: scheduleForm.asset_id || null,
+          scheduled_at: new Date(scheduleForm.scheduled_at).toISOString(),
+          idempotency_key: crypto.randomUUID(),
+        }),
+      });
+      setScheduleCampaign(null);
+      setMessage("Post queued for the selected time. The publishing worker will report its outcome.");
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnectAccount(id: string) {
+    if (!window.confirm("Disconnect this social account? Scheduled posts for this channel will no longer run.")) return;
+    setError("");
+    try {
+      await api(`/api/accounts/${id}`, token, { method: "DELETE" });
+      await refreshData(token);
+      setMessage("Channel disconnected.");
+    } catch (cause) {
+      setError((cause as Error).message);
+    }
+  }
+
+  async function validateAccount(id: string) {
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await api<{ display_name: string; verified_at: string }>(`/api/accounts/${id}/validate`, token, { method: "POST" });
+      await refreshData(token);
+      setMessage(`${result.display_name} credentials verified with the platform.`);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function uploadAsset(event: React.FormEvent) {
+    event.preventDefault();
+    if (!assetFile) return;
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const intent = await api<CloudinaryUploadIntent>("/api/assets/upload-signature", token, {
+        method: "POST",
+        body: JSON.stringify({
+          media_type: assetFile.type,
+          original_name: assetFile.name,
+          file_size: assetFile.size,
+        }),
+      });
+      const uploaded = await uploadToCloudinary(assetFile, intent);
+      await api<MarketingAsset>("/api/assets/complete", token, {
+        method: "POST",
+        body: JSON.stringify({
+          public_id: uploaded.public_id,
+          version: uploaded.version,
+          signature: uploaded.signature,
+          resource_type: uploaded.resource_type,
+          original_name: assetFile.name,
+        }),
+      });
+      await refreshData(token);
+      setAssetFile(null);
+      setMessage("Media uploaded directly to Cloudinary and analyzed by the Hugging Face inference service.");
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importAssetFromUrl(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const intent = await api<CloudinaryUploadIntent>("/api/assets/from-url", token, {
+        method: "POST",
+        body: JSON.stringify({ url: assetUrl }),
+      });
+      const uploaded = await uploadToCloudinary(assetUrl, intent);
+      const originalName = decodeURIComponent(new URL(assetUrl).pathname.split("/").pop() || "external-media");
+      await api<MarketingAsset>("/api/assets/complete", token, {
+        method: "POST",
+        body: JSON.stringify({
+          public_id: uploaded.public_id,
+          version: uploaded.version,
+          signature: uploaded.signature,
+          resource_type: uploaded.resource_type,
+          original_name: originalName,
+        }),
+      });
+      await refreshData(token);
+      setAssetUrl("");
+      setMessage("Linked media uploaded to Cloudinary and analyzed by the Hugging Face inference service.");
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function signOut() {
+    setToken("");
+    setAccounts([]);
+    setCampaigns([]);
+    setView("overview");
+  }
+
+  if (!token) {
+    return (
+      <div className="auth-page">
+        <div className="auth-brand"><span className="brand-icon">g</span><span><b>GPD Studio</b><small>Marketing, made meaningful.</small></span></div>
+        <main className="auth-card">
+          <div className="auth-eyebrow"><Sparkles size={14} /> YOUR SOCIAL WORKSPACE</div>
+          <h1>{authMode === "login" ? "Welcome back." : "Create your studio."}</h1>
+          <p>Plan thoughtful campaigns and bring every channel into one place.</p>
+          <form onSubmit={authenticate} className="stack-form">
+            <label>Email address<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+            <label>Password<input type="password" autoComplete={authMode === "login" ? "current-password" : "new-password"} minLength={authMode === "register" ? 12 : undefined} required value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+            {authError && <p className="error-text">{authError}</p>}
+            <button className="button primary wide" disabled={authBusy}>{authBusy ? <LoaderCircle className="spin" size={17} /> : null}{authMode === "login" ? "Sign in" : "Create account"}<ArrowRight size={16} /></button>
+          </form>
+          <button className="auth-switch" onClick={() => { setAuthMode(authMode === "login" ? "register" : "login"); setAuthError(""); }}>
+            {authMode === "login" ? "New to GPD Studio? Create an account" : "Already have an account? Sign in"}
+          </button>
+          <div className="auth-security"><LockKeyhole size={13} /> Channel credentials are encrypted at rest.</div>
+        </main>
+        <div className="auth-orbit orbit-one" /><div className="auth-orbit orbit-two" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="app-layout">
+      <aside className="sidebar">
+        <a className="brand" href="#" onClick={() => setView("overview")}><span className="brand-icon">g</span><span><b>GPD Studio</b><small>Marketing workspace</small></span></a>
+        <div className="side-label">WORKSPACE</div>
+        <nav className="side-nav">
+          <button className={view === "overview" ? "selected" : ""} onClick={() => setView("overview")}><Target size={17} /> Overview</button>
+          <button className={view === "channels" ? "selected" : ""} onClick={() => setView("channels")}><Send size={17} /> Channels <span className="nav-count">{accounts.length}</span></button>
+          <button className={view === "campaigns" ? "selected" : ""} onClick={() => setView("campaigns")}><CalendarDays size={17} /> Campaigns <span className="nav-count">{campaigns.length}</span></button>
+          <button className={view === "assets" ? "selected" : ""} onClick={() => setView("assets")}><FileImage size={17} /> Assets <span className="nav-count">{assets.length}</span></button>
+        </nav>
+        <div className="sidebar-fill" />
+        <div className="side-note"><Sparkles size={15} /><b>Better stories, together.</b><p>One calm place to plan your next good idea.</p></div>
+        <button className="profile-button" onClick={signOut}><span className="profile-avatar">{email.slice(0, 1).toUpperCase() || "G"}</span><span><b>{email || "Your workspace"}</b><small>Sign out</small></span><LogOut size={15} /></button>
+      </aside>
+
+      <main className="main-area">
+        <header className="topbar">
+          <div className="top-crumb">Workspace <span>/</span> <b>{view[0].toUpperCase() + view.slice(1)}</b></div>
+          <div className="top-actions"><div className={`system-status ${apiHealth}`}><i />{apiHealth === "healthy" ? "API healthy" : apiHealth === "checking" ? "Checking API" : "API unavailable"}</div><button className="icon-button" aria-label="Help"><CircleHelp size={17} /></button><button className="icon-button" aria-label="Notifications"><Bell size={17} /></button><span className="top-avatar">{email.slice(0, 1).toUpperCase() || "G"}</span></div>
+        </header>
+
+        <div className="page-content">
+          <section className="welcome-row">
+            <div><div className="eyebrow"><span /> THE WORK BEHIND THE GOOD WORK</div><h1>{view === "overview" ? "Make your next move." : view === "channels" ? "Your channels, together." : view === "campaigns" ? "Campaigns with intention." : "A library with insight."}</h1><p>Build a consistent voice, connect the right people, and grow with purpose.</p></div>
+            <div className="date-chip"><CalendarDays size={15} /> {new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(new Date())}</div>
+          </section>
+
+          {(error || message) && <div className={`notice ${error ? "notice-error" : ""}`} role="status"><span>{error || message}</span><button aria-label="Dismiss" onClick={() => { setError(""); setMessage(""); }}><X size={15} /></button></div>}
+
+          <div className="metric-grid">
+            <article className="metric-card"><span className="metric-icon green"><Send size={17} /></span><span className="metric-label">SAVED CHANNELS</span><strong>{accounts.length}<small> / 4</small></strong><p>{channelCount} platforms represented</p></article>
+            <article className="metric-card"><span className="metric-icon lilac"><CalendarDays size={17} /></span><span className="metric-label">ACTIVE CAMPAIGNS</span><strong>{campaigns.length}</strong><p>Across your connected pages</p></article>
+            <article className="metric-card"><span className="metric-icon amber"><Clock3 size={17} /></span><span className="metric-label">SCHEDULED POSTS</span><strong>—</strong><p>Publishing jobs not connected yet</p></article>
+            <article className="metric-card"><span className="metric-icon rose"><HeartHandshake size={17} /></span><span className="metric-label">ASSETS ANALYZED</span><strong>{assets.length}</strong><p>Images described and labeled</p></article>
+          </div>
+
+          <section className="content-card">
+            <div className="section-head">
+              <div><div className="section-kicker">YOUR WORKSPACE</div><h2>{view === "channels" ? "Connected channels" : view === "campaigns" ? "Your campaigns" : view === "assets" ? "Creative assets" : "Start with a strong foundation"}</h2><p>{view === "channels" ? "Connect the pages and profiles you manage." : view === "campaigns" ? "Bring your goals, strategy, and audience into focus." : view === "assets" ? "Upload or link images and videos to store them privately and have AI describe their contents." : "Connect your pages, then shape a campaign around what matters."}</p></div>
+              <div className="section-buttons">
+                {(view === "channels" || view === "overview") && <button className="button secondary" onClick={() => setShowAccountForm(true)}><Plus size={16} /> Connect a channel</button>}
+                {(view === "campaigns" || view === "overview") && <button className="button primary" onClick={() => setShowCampaignForm(true)}><Sparkles size={15} /> New campaign</button>}
+                {view === "assets" && <button className="button primary" onClick={() => document.getElementById("asset-file-input")?.click()}><ImagePlus size={15} /> Upload image</button>}
+              </div>
+            </div>
+
+            {view === "campaigns" ? (
+              campaigns.length ? <div className="campaign-list">{campaigns.map((item) => <article className="campaign-row" key={item.id}><span className="campaign-icon"><Target size={17} /></span><div className="campaign-main"><b>{item.name}</b><p>{item.objective}</p><div className="tag-row">{item.strategies.map((strategy) => <span className="tag" key={strategy}>{strategy.replace("-", " ")}</span>)}</div></div><div className="campaign-date">{new Date(item.starts_at).toLocaleDateString()} – {new Date(item.ends_at).toLocaleDateString()}</div><div className="campaign-actions"><button className="button secondary" disabled={busy || !item.account_ids.length} onClick={() => generateCampaignPlan(item)}>Generate 7-day plan</button><button className="button secondary" onClick={() => openCampaignPosts(item)}>Review posts</button><button className="button secondary" onClick={() => openScheduleForm(item)} disabled={!item.account_ids.length}>Create post</button></div></article>)}</div> : <EmptyState icon={<CalendarDays size={21} />} title="No campaigns just yet" text="Create a campaign to define your goal, audience, tone, and channels." action="Create campaign" onAction={() => setShowCampaignForm(true)} />
+            ) : view === "channels" ? (
+              accounts.length ? <div className="channel-grid">{accounts.map((item) => <ChannelCard key={item.id} account={item} onRemove={disconnectAccount} onAIConfigure={openAISettings} onValidate={validateAccount} onProfile={openProfileSettings} onTikTokSetup={openTikTokSetup} />)}<button className="add-channel-card" onClick={() => setShowAccountForm(true)}><span><Plus size={19} /></span><b>Connect another channel</b><small>Facebook · Instagram · X · TikTok</small></button></div> : <EmptyState icon={<Send size={21} />} title="Your social channels live here" text="Connect a page or profile to start building cross-channel campaigns." action="Connect a channel" onAction={() => setShowAccountForm(true)} />
+            ) : view === "assets" ? (
+              <div className="asset-library">
+                <form className="asset-upload" onSubmit={uploadAsset}>
+                  <input id="asset-file-input" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime" onChange={(event) => setAssetFile(event.target.files?.[0] ?? null)} />
+                  <div className="asset-upload-icon"><ImagePlus size={19} /></div>
+                  <b>{assetFile ? assetFile.name : "Choose an image or video file"}</b>
+                  <small>JPEG, PNG, WebP or video · images up to 12 MB · videos up to 100 MB</small>
+                  <div className="asset-upload-actions"><button type="button" className="button secondary" onClick={() => document.getElementById("asset-file-input")?.click()}><FileImage size={14} /> Choose file</button><button type="submit" className="button primary" disabled={!assetFile || busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />} Upload &amp; analyze</button></div>
+                </form>
+                <form className="asset-url-import" onSubmit={importAssetFromUrl}>
+                  <label htmlFor="asset-url-input">Or import a direct media link</label>
+                  <div><input id="asset-url-input" type="url" required inputMode="url" placeholder="https://example.com/campaign-image.jpg" value={assetUrl} onChange={(event) => setAssetUrl(event.target.value)} /><button className="button secondary" type="submit" disabled={!assetUrl || busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <ArrowRight size={14} />} Import URL</button></div>
+                  <small>Public HTTPS direct-media links · images up to 12 MB, videos up to 100 MB · no redirects</small>
+                </form>
+                {assets.length ? <div className="asset-grid">{assets.map((item) => <article className="asset-card" key={item.id}>{item.analysis_status === "needs_reupload" ? <div className="asset-unavailable">This asset is in the previous storage provider. Re-upload it to Cloudinary to use it.</div> : item.media_type.startsWith("video/") ? <video controls playsInline preload="metadata" aria-label={item.description || item.original_name}><source src={item.download_url} type={item.media_type} /></video> : <img src={item.download_url} alt={item.description || item.original_name} />}<div className="asset-card-copy"><b>{item.original_name}</b><small className="asset-description">{item.description}</small><small>{item.analysis_status === "complete" ? item.labels.slice(0, 5).join(" · ") : item.analysis_status === "needs_reupload" ? "Re-upload required" : "Analysis pending"}</small></div></article>)}</div> : <EmptyState icon={<FileImage size={21} />} title="Your library starts with an image or video" text="Upload or link campaign media and the inference service will return an AI description and labels." action="Choose a file" onAction={() => document.getElementById("asset-file-input")?.click()} />}
+              </div>
+            ) : (
+              <div className="overview-grid">
+                <div className="overview-primary">
+                  {accounts.length === 0 && <SetupStep number="01" title="Connect a channel" text="Bring your Facebook, Instagram, X, or TikTok account into your workspace." action="Connect channel" onAction={() => setShowAccountForm(true)} icon={<Send size={16} />} />}
+                  {campaigns.length === 0 && <SetupStep number={accounts.length ? "01" : "02"} title="Shape your first campaign" text="Choose a marketing goal, audience, and voice that fits your page." action="Create campaign" onAction={() => setShowCampaignForm(true)} icon={<Target size={16} />} />}
+                  <div className="insight-card"><div className="insight-mark"><Sparkles size={17} /></div><div><b>Thoughtful beats noisy.</b><p>Start with one clear audience and one useful message. We'll help you build from there.</p></div><ArrowRight size={16} /></div>
+                </div>
+                <div className="side-summary"><div className="summary-head"><b>Saved channels</b><button onClick={() => setView("channels")}>View all <ArrowRight size={13} /></button></div>{accounts.length ? accounts.slice(0, 4).map((item) => <ChannelMini key={item.id} account={item} />) : <div className="summary-empty"><FileImage size={20} /><span>No channels saved</span><small>Your saved pages will show here.</small></div>}<div className="summary-divider" /><div className="summary-foot"><span><MessageCircle size={14} /> Planning with purpose</span><span><Settings2 size={14} /> Workspace settings</span></div></div>
+              </div>
+            )}
+          </section>
+          <footer className="footer-line"><span>GPD MARKETING STUDIO</span><span>Make it useful. Make it human.</span></footer>
+        </div>
+      </main>
+
+      {showAccountForm && <Modal title="Connect a channel" description="Connect a page or profile you have permission to manage." onClose={() => setShowAccountForm(false)}>
+        <form className="modal-form" onSubmit={saveAccount}>
+          <label>Platform<select required value={account.platform} onChange={(event) => setAccount({ ...account, platform: event.target.value as Platform })}>{platforms.map((item) => <option value={item.id} key={item.id}>{item.label}</option>)}</select></label>
+          <div className="form-pair"><label>Page or profile name<input required maxLength={160} value={account.display_name} onChange={(event) => setAccount({ ...account, display_name: event.target.value })} placeholder="e.g. GPD Blog" /></label><label>Platform page / profile ID<input required maxLength={255} value={account.external_id} onChange={(event) => setAccount({ ...account, external_id: event.target.value })} placeholder="ID from your platform" /></label></div>
+          {account.platform === "tiktok" ? (
+            <div className="tiktok-hint">After connecting this profile, open Channels → TikTok login to launch the owner-assisted browser sign-in. The account owner completes login and any CAPTCHA locally; the authenticated browser state is then encrypted by the backend.</div>
+          ) : (
+            <>
+              <label>Page / developer credentials JSON<textarea required rows={4} value={account.credentials} onChange={(event) => setAccount({ ...account, credentials: event.target.value })} placeholder={account.platform === "facebook" ? '{"page_access_token":"long-lived page token"}' : account.platform === "instagram" ? '{"access_token":"long-lived Instagram token"}' : '{"access_token":"user access token"}'} /></label>
+              <label>Credential expiry <small>Optional; add it when the platform provides a known expiry.</small><input type="datetime-local" value={account.expires_at} onChange={(event) => setAccount({ ...account, expires_at: event.target.value })} /></label>
+              <p className="form-hint"><LockKeyhole size={13} /> Encrypted in PostgreSQL and not sent to Hugging Face. Verify access after connecting; only supported official platform publishing endpoints can be scheduled.</p>
+            </>
+          )}
+          <div className="modal-actions"><button type="button" className="button secondary" onClick={() => setShowAccountForm(false)}>Cancel</button><button className="button primary" disabled={busy}>{busy ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Connect channel</button></div>
+        </form>
+      </Modal>}
+
+      {aiAccountId && <Modal title="Page AI providers" description="Add one or more provider keys for this page. Each key is verified before encrypted storage." onClose={() => setAiAccountId(null)}>
+        <form className="modal-form" onSubmit={saveAISettings}>
+          <div className="provider-list">
+            {aiProviderRows.map((row, index) => {
+              const isSaved = savedAIProviders.some((item) => item.provider === row.provider);
+              return <fieldset className="provider-row" key={`${row.provider}-${index}`}>
+                <legend>{providerOptions.find((option) => option.id === row.provider)?.label}</legend>
+                <div className="form-pair">
+                  <label>Provider<select value={row.provider} onChange={(event) => {
+                    const provider = event.target.value as LLMProvider;
+                    const defaultModel = providerOptions.find((option) => option.id === provider)?.model ?? "";
+                    setAIProviderRows((rows) => rows.map((item, rowIndex) => rowIndex === index
+                      ? { ...item, provider, model: defaultModel, api_key: "" }
+                      : item));
+                  }}>{providerOptions.filter((option) => option.id === row.provider || !aiProviderRows.some((item) => item.provider === option.id)).map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>
+                  <label>Model ID<input required maxLength={160} value={row.model} onChange={(event) => setAIProviderRows((rows) => rows.map((item, rowIndex) => rowIndex === index ? { ...item, model: event.target.value } : item))} placeholder="Provider model identifier" /></label>
+                </div>
+                <div className="form-pair">
+                  <label>API key<input type="password" autoComplete="new-password" minLength={16} maxLength={4096} value={row.api_key} onChange={(event) => setAIProviderRows((rows) => rows.map((item, rowIndex) => rowIndex === index ? { ...item, api_key: event.target.value } : item))} placeholder={isSaved ? "Saved securely — leave blank to keep" : "Paste provider API key"} required={!isSaved} /></label>
+                  <label>Priority <small>Lower number is tried first.</small><input type="number" min={1} max={999} required value={row.priority} onChange={(event) => setAIProviderRows((rows) => rows.map((item, rowIndex) => rowIndex === index ? { ...item, priority: Number(event.target.value) } : item))} /></label>
+                </div>
+                <button type="button" className="text-button provider-remove" onClick={() => setAIProviderRows((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>Remove provider</button>
+              </fieldset>;
+            })}
+          </div>
+          <button type="button" className="button secondary provider-add" onClick={addAIProvider}><Plus size={14} /> Add another provider</button>
+          <p className="form-hint"><LockKeyhole size={13} /> Keys are encrypted in your database, never returned by the API, and never sent to Hugging Face.</p>
+          <div className="modal-actions"><button type="button" className="button secondary" onClick={() => setAiAccountId(null)}>Cancel</button><button className="button primary" disabled={busy || !aiProviderRows.length}>{busy ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />} Verify &amp; save</button></div>
+        </form>
+      </Modal>}
+
+      {profileAccount && profileDraft && <Modal title={`${profileAccount.display_name} page profile`} description="Set the languages, visual identity, and faith presentation the AI should respect for this page." onClose={() => { setProfileAccount(null); setProfileDraft(null); }}>
+        <form className="modal-form" onSubmit={saveProfileSettings}>
+          <label>Preferred languages <small>Posts use one language each. The planner can create separate variants when it judges them useful.</small><select multiple size={5} required value={profileDraft.languages} onChange={(event) => setProfileDraft({ ...profileDraft, languages: Array.from(event.target.selectedOptions, (option) => option.value) })}><option value="en">English</option><option value="es">Spanish</option><option value="fr">French</option><option value="pt">Portuguese</option><option value="sw">Swahili</option><option value="ar">Arabic</option><option value="zh">Chinese</option><option value="de">German</option><option value="hi">Hindi</option></select></label>
+          <div className="form-pair"><label>Primary color<input type="color" value={profileDraft.primary_color} onChange={(event) => setProfileDraft({ ...profileDraft, primary_color: event.target.value })} /></label><label>Accent color<input type="color" value={profileDraft.accent_color} onChange={(event) => setProfileDraft({ ...profileDraft, accent_color: event.target.value })} /></label></div>
+          <div className="form-pair"><label>Image font<select value={profileDraft.font_family} onChange={(event) => setProfileDraft({ ...profileDraft, font_family: event.target.value as PageProfile["font_family"] })}><option value="sans">Sans-serif</option><option value="serif">Serif</option><option value="display">Display</option></select></label><label>Brand logo<select value={profileDraft.logo_asset_id ?? ""} onChange={(event) => setProfileDraft({ ...profileDraft, logo_asset_id: event.target.value || null })}><option value="">No logo</option>{assets.filter((asset) => asset.media_type.startsWith("image/")).map((asset) => <option value={asset.id} key={asset.id}>{asset.original_name}</option>)}</select></label></div>
+          <label>Faith presentation<select value={profileDraft.faith_presentation} onChange={(event) => setProfileDraft({ ...profileDraft, faith_presentation: event.target.value as PageProfile["faith_presentation"] })}><option value="subtle">Subtle: principles reflected, no explicit religious terms</option><option value="explicit">Explicit: page may mention faith and Scripture references</option><option value="off">Off: no faith editorial guidance</option></select></label>
+          <p className="form-hint"><LockKeyhole size={13} /> The default is subtle, with no verse quotations. Bible references are restricted to reviewed references and included as internal review metadata.</p>
+          <div className="modal-actions"><button type="button" className="button secondary" onClick={() => { setProfileAccount(null); setProfileDraft(null); }}>Cancel</button><button className="button primary" disabled={busy}>{busy ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />} Save page profile</button></div>
+        </form>
+      </Modal>}
+
+      {tiktokSetupAccount && <Modal title={`${tiktokSetupAccount.display_name} TikTok login`} description="The owner signs in in a local visible browser; GPD never receives the TikTok password." onClose={() => { setTikTokSetupAccount(null); setTikTokSession(null); }}>
+        <div className="modal-form">
+          <div className="tiktok-session-status"><b>{tiktokSession?.connected ? "Browser session saved" : tiktokSession ? "Sign-in required" : "Checking session…"}</b>{tiktokSession?.expires_at && <small>Recorded expiry: {new Date(tiktokSession.expires_at).toLocaleString()}</small>}</div>
+          <p>Run this from the backend folder on a computer where you can complete TikTok sign-in. It prompts for your GPD login, opens TikTok visibly, and waits while you sign in yourself. CAPTCHA is not automated. The resulting browser state is sent over HTTPS and encrypted in the database.</p>
+          <code className="setup-command">py -m app.tiktok_auth --api-url "{API_URL || "http://127.0.0.1:8000"}" --account-id {tiktokSetupAccount.id}</code>
+          <button type="button" className="button secondary" onClick={() => {
+            void navigator.clipboard.writeText(`py -m app.tiktok_auth --api-url "${API_URL || "http://127.0.0.1:8000"}" --account-id ${tiktokSetupAccount.id}`)
+              .then(() => setMessage("TikTok setup command copied."))
+              .catch(() => setError("Could not access the clipboard; copy the command above."));
+          }}>Copy setup command</button>
+          <p className="form-hint"><LockKeyhole size={13} /> The publishing worker uses the saved browser session and official TikTok website UI—not a posting API. Expired sessions are paused for owner re-authentication; no CAPTCHA or anti-bot controls are bypassed.</p>
+          <div className="modal-actions"><button type="button" className="button secondary" onClick={() => { setTikTokSetupAccount(null); setTikTokSession(null); }}>Close</button></div>
+        </div>
+      </Modal>}
+
+      {showCampaignForm && <Modal title="Create a campaign" description="Set the objective, voice, dates, and channels before scheduling posts." onClose={() => setShowCampaignForm(false)}>
+        <form className="modal-form" onSubmit={saveCampaign}>
+          <label>Campaign name<input required maxLength={180} value={campaign.name} onChange={(event) => setCampaign({ ...campaign, name: event.target.value })} placeholder="A name your team will recognize" /></label>
+          <label>What are you marketing?<textarea required minLength={10} maxLength={5000} rows={3} value={campaign.objective} onChange={(event) => setCampaign({ ...campaign, objective: event.target.value })} placeholder="Describe the product, service, offer, or community goal." /></label>
+          <fieldset><legend>Choose marketing strategies</legend><div className="strategy-grid">{strategyOptions.map(([id, label]) => <label className="check-option" key={id}><input type="checkbox" checked={campaign.strategies.includes(id)} onChange={(event) => setCampaign({ ...campaign, strategies: event.target.checked ? [...campaign.strategies, id] : campaign.strategies.filter((item) => item !== id) })} /><span><Check size={12} /></span>{label}</label>)}</div></fieldset>
+          <label>Voice / post style<input required maxLength={80} value={campaign.tone} onChange={(event) => setCampaign({ ...campaign, tone: event.target.value })} placeholder="Warm, witty, educational…" /></label>
+          <label>Target countries, regions and cities <small>Enter JSON lists.</small><textarea rows={2} value={campaign.geography} onChange={(event) => setCampaign({ ...campaign, geography: event.target.value })} /></label>
+          <div className="form-pair"><label>Start date &amp; time<input type="datetime-local" required value={campaign.starts_at} onChange={(event) => setCampaign({ ...campaign, starts_at: event.target.value })} /></label><label>End date &amp; time<input type="datetime-local" required value={campaign.ends_at} onChange={(event) => setCampaign({ ...campaign, ends_at: event.target.value })} /></label></div>
+          <label>Timezone<input required value={campaign.timezone} onChange={(event) => setCampaign({ ...campaign, timezone: event.target.value })} /></label>
+          <fieldset><legend>AI scheduling</legend>
+            <label>Timing mode<select value={campaign.schedule_mode} onChange={(event) => setCampaign({ ...campaign, schedule_mode: event.target.value as "auto" | "specific_times" })}><option value="auto">AI selects real planetary-hour windows</option><option value="specific_times">Use my selected local times</option></select></label>
+            {campaign.schedule_mode === "specific_times" && <label>Preferred local times <small>Comma-separated, 24-hour time; AI chooses how many to use each day.</small><input required value={campaign.specific_times} onChange={(event) => setCampaign({ ...campaign, specific_times: event.target.value })} placeholder="09:00, 13:30, 18:00" /></label>}
+            <div className="form-pair"><label>Location latitude<input type="number" step="any" min="-90" max="90" required={campaign.schedule_mode === "auto"} value={campaign.latitude} onChange={(event) => setCampaign({ ...campaign, latitude: event.target.value })} placeholder="e.g. 0.3476" /></label><label>Location longitude<input type="number" step="any" min="-180" max="180" required={campaign.schedule_mode === "auto"} value={campaign.longitude} onChange={(event) => setCampaign({ ...campaign, longitude: event.target.value })} placeholder="e.g. 32.5825" /></label></div>
+            <label className="check-option"><input type="checkbox" checked={campaign.faith_guidance} onChange={(event) => setCampaign({ ...campaign, faith_guidance: event.target.checked })} /><span><Check size={12} /></span>Include subtle Christian editorial guidance</label>
+            <p className="form-hint"><CircleHelp size={13} /> Auto mode calculates sunrise and sunset for your coordinates. Planetary-hour associations are symbolic timing guidance, not Biblical doctrine or a promise of results. Scripture references are validated and kept out of copy unless the page is set to explicit faith presentation.</p>
+          </fieldset>
+          <fieldset><legend>Publish to</legend><div className="strategy-grid">{accounts.map((item) => <label className="check-option" key={item.id}><input type="checkbox" checked={campaign.account_ids.includes(item.id)} onChange={(event) => setCampaign({ ...campaign, account_ids: event.target.checked ? [...campaign.account_ids, item.id] : campaign.account_ids.filter((id) => id !== item.id) })} /><span><Check size={12} /></span>{item.display_name} <small>({item.platform})</small></label>)}</div>{!accounts.length && <p className="form-hint">Connect at least one social channel first.</p>}</fieldset>
+          <div className="form-hint"><Sparkles size={13} /> AI chooses a conservative daily cadence based on campaign objectives, channel, and audience; it avoids exceeding three posts per channel per day.</div>
+          <div className="modal-actions"><button type="button" className="button secondary" onClick={() => setShowCampaignForm(false)}>Cancel</button><button className="button primary" disabled={busy || !accounts.length}>{busy ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />} Save campaign</button></div>
+        </form>
+      </Modal>}
+
+      {scheduleCampaign && <Modal title="Schedule a post" description="Generate copy with this page's AI provider, review it, then choose a publication time." onClose={() => setScheduleCampaign(null)}>
+        <form className="modal-form" onSubmit={saveScheduledPost}>
+          <label>Channel<select required value={scheduleForm.account_id} onChange={(event) => setScheduleForm({ ...scheduleForm, account_id: event.target.value })}>{accounts.filter((item) => scheduleCampaign.account_ids.includes(item.id)).map((item) => <option value={item.id} key={item.id}>{item.display_name} · {item.platform}</option>)}</select></label>
+          <label>Media asset<select value={scheduleForm.asset_id} onChange={(event) => setScheduleForm({ ...scheduleForm, asset_id: event.target.value })}><option value="">Text only</option>{assets.map((item) => <option value={item.id} key={item.id}>{item.original_name} · {item.media_type}</option>)}</select></label>
+          <label>Post copy<textarea required minLength={1} maxLength={5000} rows={5} value={scheduleForm.text} onChange={(event) => setScheduleForm({ ...scheduleForm, text: event.target.value })} placeholder="Write or generate copy, then review it before scheduling." /></label>
+          <div className="form-pair"><button type="button" className="button secondary" onClick={generateScheduledCopy} disabled={busy || !scheduleForm.account_id}>{busy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />} Generate copy</button><label>Publish time<input type="datetime-local" required value={scheduleForm.scheduled_at} onChange={(event) => setScheduleForm({ ...scheduleForm, scheduled_at: event.target.value })} /></label></div>
+          <p className="form-hint"><Check size={13} /> Scheduled posts publish automatically after channel validation. You can cancel them while still queued.</p>
+          <div className="modal-actions"><button type="button" className="button secondary" onClick={() => setScheduleCampaign(null)}>Cancel</button><button className="button primary" disabled={busy || !scheduleForm.account_id || !scheduleForm.text.trim()}>{busy ? <LoaderCircle className="spin" size={15} /> : <CalendarDays size={15} />} Schedule post</button></div>
+        </form>
+      </Modal>}
+
+      {postsCampaign && <Modal title={`${postsCampaign.name} posts`} description="AI-planned posts stay in draft until you approve them. Queued posts publish through the channel's official API." onClose={() => setPostsCampaign(null)}>
+        <div className="scheduled-post-list">
+          {campaignPosts.length ? campaignPosts.map((post) => {
+            const channel = accounts.find((item) => item.id === post.account_id);
+            const postAsset = assets.find((item) => item.id === post.asset_id);
+            const metadata = post.planning_metadata ?? {};
+            const internalNote = [
+              typeof metadata.language === "string" ? `Language: ${metadata.language}` : "",
+              typeof metadata.translation_group === "string" ? `Language set: ${metadata.translation_group}` : "",
+              typeof metadata.planet === "string" ? `${metadata.planet} hour ${metadata.planetary_hour ?? ""}` : "",
+              typeof metadata.angel === "string" && metadata.angel ? `Angel guide: ${metadata.angel}` : "",
+              typeof metadata.scripture_reference === "string" && metadata.scripture_reference ? `KJV reference: ${metadata.scripture_reference}` : "",
+            ].filter(Boolean).join(" · ");
+            return <article className="scheduled-post-card" key={post.id}>
+              <div className="scheduled-post-head"><b>{channel?.display_name ?? "Channel"}</b><span className={`state-pill ${post.approved ? "approved" : "review"}`}>{post.status === "published" ? "Published" : post.approved ? "Queued" : "Review needed"}</span></div>
+              <small>{new Date(post.scheduled_at).toLocaleString()}</small>
+              {internalNote && <small className="planning-note">{internalNote}</small>}
+              {postAsset?.media_type.startsWith("video/") ? <video className="post-media-preview" controls playsInline preload="metadata"><source src={postAsset.download_url} type={postAsset.media_type} /></video> : postAsset && <img className="post-media-preview" src={postAsset.download_url} alt={postAsset.description || postAsset.original_name} />}
+              <p>{post.text}</p>
+              {post.last_error && <small className="error-text">{post.last_error}</small>}
+              <div className="scheduled-post-actions">
+                {!post.approved && post.status === "scheduled" && <button className="button primary" disabled={busy} onClick={() => approvePost(post)}><Check size={13} /> Approve</button>}
+                {post.status === "scheduled" && <button className="button secondary" disabled={busy} onClick={() => removePost(post)}>Cancel</button>}
+              </div>
+            </article>;
+          }) : <div className="empty-state compact"><b>No posts planned yet</b><p>Generate a plan or create an individual scheduled post.</p></div>}
+        </div>
+      </Modal>}
+    </div>
+  );
+}
+
+function ChannelCard({ account, onRemove, onAIConfigure, onValidate, onProfile, onTikTokSetup }: { account: SocialAccount; onRemove: (id: string) => void; onAIConfigure: (id: string) => void; onValidate: (id: string) => void; onProfile: (account: SocialAccount) => void; onTikTokSetup: (account: SocialAccount) => void }) {
+  const channel = platforms.find((item) => item.id === account.platform) ?? platforms[0];
+  const Icon = channel.icon;
+  return <article className="channel-card"><div className={`platform-icon ${account.platform}`}><Icon size={18} /></div><div className="channel-card-title"><b>{account.display_name}</b><small>{channel.label} · ID {account.external_id}</small></div><span className="connected"><i /> {account.platform === "tiktok" ? "Browser login" : account.credentials_verified_at ? "Verified" : "Unverified"}</span><div className="channel-actions"><button className="text-button" onClick={() => onProfile(account)}>Page profile</button>{account.platform === "tiktok" ? <button className="text-button" onClick={() => onTikTokSetup(account)}>TikTok login</button> : <button className="text-button" onClick={() => onValidate(account.id)}>Verify platform</button>}<button className="text-button" onClick={() => onAIConfigure(account.id)}>AI provider keys</button><button className="text-button" onClick={() => onRemove(account.id)}>Disconnect</button></div></article>;
+}
+
+function ChannelMini({ account }: { account: SocialAccount }) {
+  const channel = platforms.find((item) => item.id === account.platform) ?? platforms[0];
+  const Icon = channel.icon;
+  return <div className="channel-mini"><span className={`platform-icon small ${account.platform}`}><Icon size={14} /></span><span><b>{account.display_name}</b><small>{channel.label}</small></span><i /></div>;
+}
+
+function EmptyState({ icon, title, text, action, onAction }: { icon: React.ReactNode; title: string; text: string; action: string; onAction: () => void }) {
+  return <div className="empty-state"><span className="empty-icon">{icon}</span><b>{title}</b><p>{text}</p><button className="button primary" onClick={onAction}><Plus size={15} /> {action}</button></div>;
+}
+
+function SetupStep({ number, title, text, action, onAction, icon }: { number: string; title: string; text: string; action: string; onAction: () => void; icon: React.ReactNode }) {
+  return <article className="setup-step"><span className="step-num">{number}</span><span className="step-icon">{icon}</span><div className="step-copy"><b>{title}</b><p>{text}</p></div><button className="button secondary" onClick={onAction}>{action}<ArrowRight size={14} /></button></article>;
+}
+
+function Modal({ title, description, onClose, children }: { title: string; description: string; onClose: () => void; children: React.ReactNode }) {
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) { if (event.key === "Escape") onClose(); }
+    window.addEventListener("keydown", onKey);
+    document.body.classList.add("modal-open");
+    return () => { window.removeEventListener("keydown", onKey); document.body.classList.remove("modal-open"); };
+  }, [onClose]);
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><header><div><h2 id="modal-title">{title}</h2><p>{description}</p></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button></header>{children}</section></div>;
+}
