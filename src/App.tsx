@@ -65,7 +65,7 @@ async function uploadToCloudinary(source: File | string, intent: CloudinaryUploa
 }
 
 const providerOptions: { id: LLMProvider; label: string; model: string }[] = [
-  { id: "gemini", label: "Google Gemini", model: "gemini-2.5-flash" },
+  { id: "gemini", label: "Google Gemini", model: "gemini-3.5-flash-lite" },
   { id: "openai", label: "OpenAI", model: "gpt-4.1-mini" },
   { id: "anthropic", label: "Anthropic", model: "claude-3-7-sonnet-latest" },
   { id: "openrouter", label: "OpenRouter", model: "openrouter/auto" },
@@ -226,7 +226,7 @@ export default function App() {
       setSavedAIProviders(configured);
       setAIProviderRows(configured.length
         ? configured.map(({ provider, model, priority }) => ({ provider, model, priority, api_key: "" }))
-        : [{ provider: "gemini", model: "gemini-2.5-flash", priority: 1, api_key: "" }]);
+        : [{ provider: "gemini", model: "gemini-3.5-flash-lite", priority: 1, api_key: "" }]);
       setAiAccountId(accountId);
     } catch (cause) {
       setError((cause as Error).message);
