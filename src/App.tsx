@@ -15,6 +15,7 @@ import {
   type CloudinaryUploadResult,
   type LLMProvider,
   type MarketingAsset,
+  type MediaGenerationJob,
   type PageProfile,
   type Platform,
   type PublishingSummary,
@@ -117,6 +118,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [showAccountForm, setShowAccountForm] = useState(false);
   const [showCampaignForm, setShowCampaignForm] = useState(false);
+  const [mediaCampaign, setMediaCampaign] = useState<Campaign | null>(null);
   const [profileAccount, setProfileAccount] = useState<SocialAccount | null>(null);
   const [profileDraft, setProfileDraft] = useState<PageProfile | null>(null);
   const [tiktokSetupAccount, setTikTokSetupAccount] = useState<SocialAccount | null>(null);
@@ -822,6 +824,8 @@ export default function App() {
           ? <div className="asset-unavailable">This asset is in the previous storage provider. Re-upload it to Cloudinary to use it.</div>
           : item.media_type.startsWith("video/")
             ? <video controls playsInline preload="metadata" aria-label={item.description || item.original_name}><source src={item.download_url} type={item.media_type} /></video>
+            : item.media_type.startsWith("audio/")
+              ? <audio controls preload="metadata" aria-label={item.description || item.original_name}><source src={item.download_url} type={item.media_type} /></audio>
             : <img src={item.download_url} alt={item.description || item.original_name} />}
         <div className="asset-card-copy">
           <b>{item.original_name}</b>
@@ -1027,7 +1031,7 @@ export default function App() {
 
           <section className="content-card">
             <div className="section-head">
-              <div><div className="section-kicker">YOUR WORKSPACE</div><h2>{view === "channels" ? "Connected channels" : view === "campaigns" ? "Your campaigns" : view === "assets" ? "Creative assets" : "Start with a strong foundation"}</h2><p>{view === "channels" ? "Connect the pages and profiles you manage." : view === "campaigns" ? "Bring your goals, strategy, and audience into focus." : view === "assets" ? "Upload or link images and videos to store them privately and have AI describe their contents." : "Connect your pages, then shape a campaign around what matters."}</p></div>
+              <div><div className="section-kicker">YOUR WORKSPACE</div><h2>{view === "channels" ? "Connected channels" : view === "campaigns" ? "Your campaigns" : view === "assets" ? "Creative assets" : "Start with a strong foundation"}</h2><p>{view === "channels" ? "Connect the pages and profiles you manage." : view === "campaigns" ? "Bring your goals, strategy, and audience into focus." : view === "assets" ? "Upload or link images, videos, and audio to keep each channel's media organized." : "Connect your pages, then shape a campaign around what matters."}</p></div>
               <div className="section-buttons">
                 {(view === "channels" || view === "overview") && <button className="button secondary" onClick={() => setShowAccountForm(true)}><Plus size={16} /> Connect a channel</button>}
                 {(view === "campaigns" || view === "overview") && <button className="button primary" onClick={() => setShowCampaignForm(true)}><Sparkles size={15} /> New campaign</button>}
@@ -1080,6 +1084,7 @@ export default function App() {
                       <button className="button secondary" disabled={busy || !item.account_ids.length} onClick={() => generateCampaignPlan(item)}>Generate 7 days</button>
                       <button className="button secondary" disabled={busy || !item.account_ids.length || generation?.status === "active" || generation?.status === "processing" || generation?.status === "completed"} onClick={() => generation?.status === "failed" ? resumeCampaignGeneration(item) : generateCampaignPlan(item, true)}>{generation?.status === "failed" ? "Resume rolling" : generation?.status === "active" ? "Rolling active" : generation?.status === "completed" ? "Rolling complete" : "Generate campaign"}</button>
                       <button className="button secondary" onClick={() => openCampaignPosts(item)}>Review posts</button>
+                      <button className="button secondary" onClick={() => setMediaCampaign(item)}><Video size={14} /> Media studio</button>
                       <button className="button secondary" onClick={() => openScheduleForm(item)} disabled={!item.account_ids.length}>Create post</button>
                     </div>
                   </article>;
@@ -1097,16 +1102,16 @@ export default function App() {
                 </label>
                 {!accounts.length && <p className="form-hint">Connect a social channel before uploading assets so each file has a clear page owner.</p>}
                 <form className="asset-upload" onSubmit={uploadAsset}>
-                  <input id="asset-file-input" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime" onChange={(event) => setAssetFile(event.target.files?.[0] ?? null)} />
+                  <input id="asset-file-input" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime,audio/mpeg,audio/wav,audio/mp4,audio/ogg,audio/flac" onChange={(event) => setAssetFile(event.target.files?.[0] ?? null)} />
                   <div className="asset-upload-icon"><ImagePlus size={19} /></div>
-                  <b>{assetFile ? assetFile.name : "Choose an image or video file"}</b>
-                  <small>JPEG, PNG, WebP or video · images up to 12 MB · videos up to 100 MB</small>
+                  <b>{assetFile ? assetFile.name : "Choose an image, video, or audio file"}</b>
+                  <small>JPEG, PNG, WebP, MP4, WebM, MOV, MP3, WAV, M4A, OGG or FLAC · images 12 MB, audio 25 MB, video 100 MB</small>
                   <div className="asset-upload-actions"><button type="button" className="button secondary" disabled={!accounts.length} onClick={() => document.getElementById("asset-file-input")?.click()}><FileImage size={14} /> Choose file</button><button type="submit" className="button primary" disabled={!assetFile || !assetAccountId || busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />} Upload &amp; analyze</button></div>
                 </form>
                 <form className="asset-url-import" onSubmit={importAssetFromUrl}>
                   <label htmlFor="asset-url-input">Or import a direct media link</label>
                   <div><input id="asset-url-input" type="url" required inputMode="url" placeholder="https://example.com/campaign-image.jpg" value={assetUrl} onChange={(event) => setAssetUrl(event.target.value)} /><button className="button secondary" type="submit" disabled={!assetUrl || !assetAccountId || busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <ArrowRight size={14} />} Import URL</button></div>
-                  <small>Public HTTPS direct-media links · images up to 12 MB, videos up to 100 MB · no redirects</small>
+                  <small>Public HTTPS direct-media links · images 12 MB, audio 25 MB, video 100 MB · no redirects</small>
                 </form>
                 {assets.length ? <>
                   {accounts.map((channel) => {
@@ -1122,7 +1127,7 @@ export default function App() {
                     <header><div><b>Unassigned legacy assets</b><small>These assets are not available to campaign generation until assigned.</small></div></header>
                     <div className="asset-grid">{assets.filter((item) => item.account_id === null).map(renderAssetCard)}</div>
                   </section>}
-                </> : <EmptyState icon={<FileImage size={21} />} title="Your library starts with an image or video" text="Upload or link campaign media and the inference service will return an AI description and labels." action="Choose a file" onAction={() => document.getElementById("asset-file-input")?.click()} />}
+                </> : <EmptyState icon={<FileImage size={21} />} title="Your library starts with campaign media" text="Upload images, videos, or audio to organize assets by page and use them in your campaign media studio." action="Choose a file" onAction={() => document.getElementById("asset-file-input")?.click()} />}
               </div>
             ) : (
               <div className="overview-grid">
@@ -1242,10 +1247,19 @@ export default function App() {
         </form>
       </Modal>}
 
+      {mediaCampaign && <CampaignMediaStudio
+        campaign={mediaCampaign}
+        accounts={accounts}
+        assets={assets}
+        token={token}
+        onClose={() => setMediaCampaign(null)}
+        onAssetsUpdated={() => refreshData(token)}
+      />}
+
       {scheduleCampaign && <Modal title="Schedule a post" description="Generate copy with this page's AI provider, review it, then choose a publication time." onClose={() => setScheduleCampaign(null)}>
         <form className="modal-form" onSubmit={saveScheduledPost}>
           <label>Channel<select required value={scheduleForm.account_id} onChange={(event) => setScheduleForm({ ...scheduleForm, account_id: event.target.value, asset_id: "" })}>{accounts.filter((item) => scheduleCampaign.account_ids.includes(item.id)).map((item) => <option value={item.id} key={item.id}>{item.display_name} · {item.platform}</option>)}</select></label>
-          <label>Media asset<select value={scheduleForm.asset_id} onChange={(event) => setScheduleForm({ ...scheduleForm, asset_id: event.target.value })}><option value="">Text only</option>{assets.filter((item) => item.account_id === scheduleForm.account_id).map((item) => <option value={item.id} key={item.id}>{item.original_name} · {item.media_type}</option>)}</select></label>
+          <label>Media asset<select value={scheduleForm.asset_id} onChange={(event) => setScheduleForm({ ...scheduleForm, asset_id: event.target.value })}><option value="">Text only</option>{assets.filter((item) => item.account_id === scheduleForm.account_id && (item.media_type.startsWith("image/") || item.media_type.startsWith("video/"))).map((item) => <option value={item.id} key={item.id}>{item.original_name} · {item.media_type}</option>)}</select></label>
           <label>Post copy<textarea required minLength={1} maxLength={5000} rows={5} value={scheduleForm.text} onChange={(event) => setScheduleForm({ ...scheduleForm, text: event.target.value })} placeholder="Write or generate copy, then review it before scheduling." /></label>
           <div className="form-pair"><button type="button" className="button secondary" onClick={generateScheduledCopy} disabled={busy || !scheduleForm.account_id}>{busy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />} Generate copy</button><label>Publish time<input type="datetime-local" required value={scheduleForm.scheduled_at} onChange={(event) => setScheduleForm({ ...scheduleForm, scheduled_at: event.target.value })} /></label></div>
           <p className="form-hint"><Check size={13} /> Scheduled posts publish automatically after channel validation. You can cancel them while still queued.</p>
@@ -1284,6 +1298,225 @@ export default function App() {
       <CookieNotice onOpenPolicy={() => openLegalPage("cookies")} />
     </div>
   );
+}
+
+function CampaignMediaStudio({
+  campaign,
+  accounts,
+  assets,
+  token,
+  onClose,
+  onAssetsUpdated,
+}: {
+  campaign: Campaign;
+  accounts: SocialAccount[];
+  assets: MarketingAsset[];
+  token: string;
+  onClose: () => void;
+  onAssetsUpdated: () => Promise<void>;
+}) {
+  const [accountId, setAccountId] = useState(campaign.account_ids[0] ?? "");
+  const [prompt, setPrompt] = useState(
+    `${campaign.objective}\nCampaign: ${campaign.name}\nAudience/location: ${[...campaign.geography.cities, ...campaign.geography.regions, ...campaign.geography.countries].join(", ") || "Use an inclusive, locally relevant setting."}`.slice(0, 2390),
+  );
+  const [motionSeconds, setMotionSeconds] = useState(2);
+  const [finalSeconds, setFinalSeconds] = useState(10);
+  const [narrationText, setNarrationText] = useState("");
+  const [voiceReferenceText, setVoiceReferenceText] = useState("");
+  const [language, setLanguage] = useState("English");
+  const [tone, setTone] = useState("Warm and reassuring");
+  const [voiceReferenceAssetId, setVoiceReferenceAssetId] = useState("");
+  const [soundtrackAssetId, setSoundtrackAssetId] = useState("");
+  const [sourceImageAssetId, setSourceImageAssetId] = useState("");
+  const [posterAssetId, setPosterAssetId] = useState("");
+  const [consentConfirmed, setConsentConfirmed] = useState(false);
+  const [jobs, setJobs] = useState<MediaGenerationJob[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [suggesting, setSuggesting] = useState(false);
+  const [error, setError] = useState("");
+  const refreshedJobs = useRef(new Set<string>());
+  const onAssetsUpdatedRef = useRef(onAssetsUpdated);
+  onAssetsUpdatedRef.current = onAssetsUpdated;
+
+  const accountAssets = assets.filter((asset) => asset.account_id === accountId);
+  const imageAssets = accountAssets.filter((asset) => asset.media_type.startsWith("image/"));
+  const audioAssets = accountAssets.filter((asset) => asset.media_type.startsWith("audio/"));
+  const accountLanguages = accounts.find((item) => item.id === accountId)?.profile.languages ?? [];
+  const supportedLanguageCodes = new Set([
+    "de", "en", "es", "fr", "it", "ja", "ko", "pt", "ru", "zh",
+  ]);
+  const voiceLanguages = accountLanguages.some((code) => supportedLanguageCodes.has(code))
+    ? accountLanguages.filter((code) => supportedLanguageCodes.has(code))
+    : ["en"];
+
+  useEffect(() => {
+    let active = true;
+    async function refreshJobs() {
+      try {
+        const response = await api<{ jobs: MediaGenerationJob[] }>(
+          `/api/campaigns/${campaign.id}/media-jobs`,
+          token,
+        );
+        if (!active) return;
+        setJobs(response.jobs);
+        const completed = response.jobs.filter((job) => job.status === "completed" && !refreshedJobs.current.has(job.id));
+        if (completed.length) {
+          completed.forEach((job) => refreshedJobs.current.add(job.id));
+          await onAssetsUpdatedRef.current();
+        }
+      } catch (cause) {
+        if (active) setError((cause as Error).message || "Media job status could not be loaded.");
+      }
+    }
+    void refreshJobs();
+    const timer = window.setInterval(() => void refreshJobs(), 5000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [campaign.id, token]);
+
+  async function suggestNarration() {
+    const channel = accounts.find((item) => item.id === accountId);
+    if (!channel) return;
+    setSuggesting(true);
+    setError("");
+    try {
+      const result = await api<{ text: string }>(`/api/accounts/${channel.id}/ai/generate`, token, {
+        method: "POST",
+        body: JSON.stringify({
+          max_tokens: 300,
+          prompt: [
+            "Write a natural, concise spoken narration for a social-media campaign video.",
+            `Campaign: ${campaign.name}.`,
+            `Objective: ${campaign.objective}.`,
+            `Campaign voice: ${campaign.tone}.`,
+            `Language: ${language}.`,
+            "Use 1-3 short sentences, avoid unsupported claims and stage directions, and return only narration text.",
+          ].join("\n"),
+        }),
+      });
+      setNarrationText(result.text.trim());
+    } catch (cause) {
+      setError((cause as Error).message || "Narration could not be suggested.");
+    } finally {
+      setSuggesting(false);
+    }
+  }
+
+  async function createJob(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const job = await api<MediaGenerationJob>(`/api/campaigns/${campaign.id}/media-jobs`, token, {
+        method: "POST",
+        body: JSON.stringify({
+          account_id: accountId,
+          prompt,
+          motion_seconds: motionSeconds,
+          final_seconds: finalSeconds,
+          narration_text: narrationText,
+          voice_reference_text: voiceReferenceText,
+          language,
+          tone,
+          voice_reference_asset_id: voiceReferenceAssetId || null,
+          soundtrack_asset_id: soundtrackAssetId || null,
+          source_image_asset_id: sourceImageAssetId || null,
+          poster_asset_id: posterAssetId || null,
+          consent_confirmed: consentConfirmed,
+        }),
+      });
+      setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
+      setMessageForJob(job);
+    } catch (cause) {
+      setError((cause as Error).message || "Campaign video could not be queued.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function setMessageForJob(job: MediaGenerationJob) {
+    setError("");
+    setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
+  }
+
+  return (
+    <Modal title="Campaign media studio" description={`Create voice-led, mixed-media video for ${campaign.name}.`} onClose={onClose}>
+      <form className="modal-form media-studio-form" onSubmit={createJob}>
+        <div className="media-studio-intro">
+          <span className="media-studio-icon"><Video size={20} /></span>
+          <div><b>Shape the story, then queue the render</b><p>AI motion runs for 2, 4, or 10 seconds. Extend the finished edit to 30 seconds with a gently animated photo scene and optional end card.</p></div>
+        </div>
+        <label>Campaign channel<select required value={accountId} onChange={(event) => {
+          const nextAccount = accounts.find((item) => item.id === event.target.value);
+          const nextLanguage = nextAccount?.profile.languages.find((code) => supportedLanguageCodes.has(code));
+          setAccountId(event.target.value);
+          setLanguage(languageName(nextLanguage ?? "en"));
+          setVoiceReferenceAssetId("");
+          setSoundtrackAssetId("");
+          setSourceImageAssetId("");
+          setPosterAssetId("");
+          setVoiceReferenceText("");
+        }}>{accounts.filter((item) => campaign.account_ids.includes(item.id)).map((item) => <option value={item.id} key={item.id}>{item.display_name} · {item.platform}</option>)}</select></label>
+        <label>Visual direction<textarea required minLength={10} maxLength={2400} rows={3} value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label>
+        <div className="form-pair">
+          <label>AI motion<select value={motionSeconds} onChange={(event) => setMotionSeconds(Number(event.target.value))}><option value={2}>2 seconds</option><option value={4}>4 seconds</option><option value={10}>10 seconds</option></select></label>
+          <label>Final edit<select value={finalSeconds} onChange={(event) => setFinalSeconds(Number(event.target.value))}>{[2, 4, 10, 15, 20, 30].map((seconds) => <option value={seconds} key={seconds}>{seconds} seconds</option>)}</select></label>
+        </div>
+        <fieldset>
+          <legend>Narration and sound</legend>
+          <div className="media-studio-inline"><label>Language<select value={language} onChange={(event) => setLanguage(event.target.value)}>{voiceLanguages.map((code) => <option value={languageName(code)} key={code}>{languageName(code)}</option>)}</select></label><label>Delivery<select value={tone} onChange={(event) => setTone(event.target.value)}>{["Warm and reassuring", "Bright and energetic", "Calm and reflective", "Confident and persuasive", "Clear and educational"].map((item) => <option value={item} key={item}>{item}</option>)}</select></label></div>
+          {!accountLanguages.some((code) => supportedLanguageCodes.has(code)) && <p className="form-hint"><CircleHelp size={13} /> The voice model does not support this page's configured language. Narration defaults to English; edit or translate the script before generating it.</p>}
+          <label>Narration script<textarea maxLength={2400} rows={3} value={narrationText} onChange={(event) => setNarrationText(event.target.value)} placeholder="Write the voice-over, or ask AI to suggest an editable draft." /></label>
+          <button type="button" className="button secondary media-studio-suggest" disabled={suggesting || !accountId} onClick={() => void suggestNarration()}>{suggesting ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />} Suggest narration</button>
+          <div className="form-pair">
+            <label>Voice sample<select value={voiceReferenceAssetId} onChange={(event) => {
+              setVoiceReferenceAssetId(event.target.value);
+              setVoiceReferenceText("");
+            }}><option value="">Use the default voice</option>{audioAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.original_name}</option>)}</select></label>
+            <label>Background audio<select value={soundtrackAssetId} onChange={(event) => setSoundtrackAssetId(event.target.value)}><option value="">No extra soundtrack</option>{audioAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.original_name}</option>)}</select></label>
+          </div>
+          {voiceReferenceAssetId && <label>Voice sample transcript<textarea required maxLength={2400} rows={2} value={voiceReferenceText} onChange={(event) => setVoiceReferenceText(event.target.value)} placeholder="Write the words spoken in the voice sample; this helps the model clone the voice accurately." /></label>}
+          <p className="form-hint"><CircleHelp size={13} /> Narration language support: English, Spanish, Chinese, Japanese, Korean, German, French, Russian, Portuguese, and Italian.</p>
+        </fieldset>
+        <fieldset>
+          <legend>Campaign visuals</legend>
+          <div className="form-pair">
+            <label>Photo scene<select value={sourceImageAssetId} onChange={(event) => setSourceImageAssetId(event.target.value)}><option value="">Use a frame from generated motion</option>{imageAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.original_name}</option>)}</select></label>
+            <label>Promotional end card<select value={posterAssetId} onChange={(event) => setPosterAssetId(event.target.value)}><option value="">No end card</option>{imageAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.original_name}</option>)}</select></label>
+          </div>
+          <p className="form-hint"><CircleHelp size={13} /> Free-tier source photos receive a gentle pan/zoom treatment; person extraction and lip-sync are not included in this version. A two-second end card is included within the selected final duration.</p>
+        </fieldset>
+        <label className="check-option media-consent"><input type="checkbox" checked={consentConfirmed} onChange={(event) => setConsentConfirmed(event.target.checked)} /><span><Check size={12} /></span>I have permission to use every submitted voice recording and person shown in the selected photos.</label>
+        <div className="media-studio-submit"><button className="button primary" disabled={busy || !accountId || !consentConfirmed || (voiceReferenceAssetId && !voiceReferenceText.trim()) || motionSeconds > finalSeconds - (posterAssetId ? 2 : 0)}>{busy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />} Queue video generation</button><small>Processing runs through the server worker and persists in your campaign.</small></div>
+        {error && <p className="error-text" role="alert">{error}</p>}
+        <section className="media-job-list" aria-live="polite">
+          <h3>Recent campaign renders</h3>
+          {jobs.length ? jobs.map((job) => <article className="media-job-card" key={job.id}>
+            <div className="media-job-heading"><b>{job.final_seconds}s campaign edit</b><span className={`media-job-state ${job.status}`}>{job.status === "completed" ? "Ready" : job.status === "failed" ? "Failed" : job.status === "processing" ? "Processing" : "Queued"}</span></div>
+            {job.status === "processing" && <div className="media-progress"><span /></div>}
+            <p>{job.status === "queued"
+              ? `Waiting for shared ZeroGPU capacity. ${job.last_error ? `${job.last_error} ` : ""}Next attempt: ${new Date(job.next_run_at).toLocaleString()}.`
+              : job.status === "processing"
+                ? `Generating scenes and composing audio · ${job.stage.replaceAll("_", " ")}.`
+                : job.status === "failed"
+                  ? job.last_error
+                  : `${job.motion_seconds}s of generated motion · ${job.language} narration`}</p>
+            {job.output_url && <video className="media-job-preview" controls playsInline preload="metadata"><source src={job.output_url} type="video/mp4" /></video>}
+          </article>) : <p className="media-job-empty">Your campaign video renders and their progress will appear here.</p>}
+        </section>
+      </form>
+    </Modal>
+  );
+}
+
+function languageName(code: string): string {
+  const names: Record<string, string> = {
+    de: "German", en: "English", es: "Spanish", fr: "French", it: "Italian",
+    ja: "Japanese", ko: "Korean", pt: "Portuguese", ru: "Russian", zh: "Chinese",
+  };
+  return names[code] ?? "English";
 }
 
 function ChannelCard({ account, onRemove, onAIConfigure, onValidate, onProfile, onTikTokSetup }: { account: SocialAccount; onRemove: (id: string) => void; onAIConfigure: (id: string) => void; onValidate: (id: string) => void; onProfile: (account: SocialAccount) => void; onTikTokSetup: (account: SocialAccount) => void }) {

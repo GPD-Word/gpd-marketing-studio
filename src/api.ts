@@ -99,6 +99,28 @@ export interface CampaignGenerationJob {
   last_error: string | null;
 }
 
+export interface MediaGenerationJob {
+  id: string;
+  campaign_id: string;
+  account_id: string;
+  status: "queued" | "processing" | "completed" | "failed";
+  stage: string;
+  prompt: string;
+  motion_seconds: number;
+  final_seconds: number;
+  narration_text: string;
+  voice_reference_text: string;
+  language: string;
+  tone: string;
+  output_asset_id: string | null;
+  output_url: string | null;
+  last_error: string | null;
+  attempts: number;
+  next_run_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface PublishingSummary {
   scheduled: number;
   processing: number;
