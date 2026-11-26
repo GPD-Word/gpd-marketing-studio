@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
-  ArrowRight, Bell, CalendarDays, Check, CircleHelp, Clock3, Facebook, FileImage,
+  ArrowRight, CalendarDays, Check, CircleHelp, Clock3, Facebook, FileImage,
   HeartHandshake, ImagePlus, Instagram, LoaderCircle, LockKeyhole, LogOut,
   MessageCircle, Plus, Send, Settings2, Sparkles, Target, Video, X,
 } from "lucide-react";
@@ -9,6 +9,7 @@ import {
   API_URL,
   type AIProviderConfig,
   type Campaign,
+  type CampaignGeography,
   type CloudinaryUploadIntent,
   type CloudinaryUploadResult,
   type LLMProvider,
@@ -18,6 +19,8 @@ import {
   type ScheduledPost,
   type SocialAccount,
 } from "./api";
+import { GeographyPicker } from "./GeographyPicker";
+import { CookieNotice, LegalLinks, LegalPage, type LegalPageKey } from "./LegalPages";
 
 const strategyOptions = [
   ["awareness", "Awareness"],
@@ -74,11 +77,23 @@ const providerOptions: { id: LLMProvider; label: string; model: string }[] = [
 
 export default function App() {
   const [token, setToken] = useState("");
+  const [tokenExpiresAt, setTokenExpiresAt] = useState(0);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [rememberMe, setRememberMe] = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [showPasswords, setShowPasswords] = useState(false);
+  const [authRestoring, setAuthRestoring] = useState(true);
+  const [legalPage, setLegalPage] = useState<LegalPageKey | null>(() => {
+    const requested = new URLSearchParams(window.location.search).get("legal");
+    return requested === "privacy" || requested === "cookies" || requested === "terms"
+      ? requested
+      : null;
+  });
   const [apiHealth, setApiHealth] = useState<"checking" | "healthy" | "unavailable">("checking");
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
@@ -119,7 +134,7 @@ export default function App() {
     objective: "",
     strategies: ["awareness"] as string[],
     tone: "Warm and helpful",
-    geography: '{"countries":[],"regions":[],"cities":[]}',
+    geography: { countries: [], regions: [], cities: [], districts: [] } as CampaignGeography,
     starts_at: "",
     ends_at: "",
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
@@ -132,6 +147,72 @@ export default function App() {
   });
 
   const channelCount = useMemo(() => new Set(accounts.map((item) => item.platform)).size, [accounts]);
+
+  function applyAuth(result: AuthResponse) {
+    setToken(result.access_token);
+    setTokenExpiresAt(Date.now() + result.expires_in * 1000);
+  }
+
+  function openLegalPage(page: LegalPageKey) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("legal", page);
+    window.history.pushState({ legal: page }, "", `${url.pathname}${url.search}${url.hash}`);
+    setLegalPage(page);
+  }
+
+  function closeLegalPage() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("legal");
+    window.history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    setLegalPage(null);
+  }
+
+  useEffect(() => {
+    function syncLegalPage() {
+      const requested = new URLSearchParams(window.location.search).get("legal");
+      setLegalPage(
+        requested === "privacy" || requested === "cookies" || requested === "terms"
+          ? requested
+          : null,
+      );
+    }
+    window.addEventListener("popstate", syncLegalPage);
+    return () => window.removeEventListener("popstate", syncLegalPage);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    api<AuthResponse>("/api/auth/refresh", undefined, { method: "POST" })
+      .then(async (result) => {
+        const user = await api<{ email: string }>("/api/me", result.access_token);
+        if (active) {
+          applyAuth(result);
+          setEmail(user.email);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (active) setAuthRestoring(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!token || !tokenExpiresAt) return undefined;
+    const refreshDelay = Math.max(1000, tokenExpiresAt - Date.now() - 60_000);
+    const timer = window.setTimeout(() => {
+      api<AuthResponse>("/api/auth/refresh", undefined, { method: "POST" })
+        .then(applyAuth)
+        .catch(() => {
+          setToken("");
+          setTokenExpiresAt(0);
+          setEmail("");
+        });
+    }, refreshDelay);
+    return () => window.clearTimeout(timer);
+  }, [token, tokenExpiresAt]);
 
   async function refreshData(activeToken: string) {
     const [nextAccounts, nextCampaigns, nextAssets] = await Promise.all([
@@ -166,15 +247,30 @@ export default function App() {
 
   async function authenticate(event: React.FormEvent) {
     event.preventDefault();
+    if (authMode === "register" && password !== confirmPassword) {
+      setAuthError("The passwords do not match.");
+      return;
+    }
+    if (authMode === "register" && !termsAccepted) {
+      setAuthError("Please accept the Terms of Service to create an account.");
+      return;
+    }
     setAuthBusy(true);
     setAuthError("");
     try {
       const result = await api<AuthResponse>(`/api/auth/${authMode}`, undefined, {
         method: "POST",
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({
+          email,
+          password,
+          remember_me: rememberMe,
+          ...(authMode === "register" ? { terms_accepted: termsAccepted } : {}),
+        }),
       });
-      setToken(result.access_token);
+      applyAuth(result);
+      setEmail(email.trim());
       setPassword("");
+      setConfirmPassword("");
     } catch (cause) {
       setAuthError((cause as Error).message);
     } finally {
@@ -331,7 +427,6 @@ export default function App() {
     setError("");
     setMessage("");
     try {
-      const geography = JSON.parse(campaign.geography) as Record<string, unknown>;
       const specificTimes = campaign.specific_times
         .split(",")
         .map((value) => value.trim())
@@ -343,7 +438,7 @@ export default function App() {
           objective: campaign.objective,
           strategies: campaign.strategies,
           tone: campaign.tone,
-          geography,
+          geography: campaign.geography,
           starts_at: new Date(campaign.starts_at).toISOString(),
           ends_at: new Date(campaign.ends_at).toISOString(),
           timezone: campaign.timezone,
@@ -596,57 +691,166 @@ export default function App() {
     }
   }
 
-  function signOut() {
-    setToken("");
-    setAccounts([]);
-    setCampaigns([]);
-    setView("overview");
+  async function signOut() {
+    try {
+      await api<void>("/api/auth/logout", undefined, { method: "POST" });
+    } catch (cause) {
+      setAuthError(`Signed out on this device, but the server could not revoke the remembered session: ${(cause as Error).message}`);
+    } finally {
+      setToken("");
+      setTokenExpiresAt(0);
+      setAccounts([]);
+      setCampaigns([]);
+      setAssets([]);
+      setEmail("");
+      setView("overview");
+    }
+  }
+
+  if (legalPage) {
+    return (
+      <>
+        <LegalPage page={legalPage} onNavigate={openLegalPage} onBack={closeLegalPage} />
+        <CookieNotice onOpenPolicy={() => openLegalPage("cookies")} />
+      </>
+    );
+  }
+
+  if (authRestoring) {
+    return (
+      <div className="auth-page" aria-busy="true">
+        <main className="auth-card" role="status" aria-live="polite">
+          <LoaderCircle className="spin" size={22} aria-hidden="true" />
+          <p>Checking for a saved sign-in…</p>
+        </main>
+        <CookieNotice onOpenPolicy={() => openLegalPage("cookies")} />
+      </div>
+    );
   }
 
   if (!token) {
     return (
       <div className="auth-page">
-        <div className="auth-brand"><span className="brand-icon">g</span><span><b>GPD Studio</b><small>Marketing, made meaningful.</small></span></div>
-        <main className="auth-card">
-          <div className="auth-eyebrow"><Sparkles size={14} /> YOUR SOCIAL WORKSPACE</div>
+        <a className="skip-link" href="#auth-form">Skip to sign-in form</a>
+        <div className="auth-brand"><span className="brand-icon" aria-hidden="true">g</span><span><b>GPD Studio</b><small>Marketing, made meaningful.</small></span></div>
+        <main className="auth-card" id="auth-form">
+          <div className="auth-eyebrow"><Sparkles size={14} aria-hidden="true" /> YOUR SOCIAL WORKSPACE</div>
           <h1>{authMode === "login" ? "Welcome back." : "Create your studio."}</h1>
           <p>Plan thoughtful campaigns and bring every channel into one place.</p>
-          <form onSubmit={authenticate} className="stack-form">
-            <label>Email address<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></label>
-            <label>Password<input type="password" autoComplete={authMode === "login" ? "current-password" : "new-password"} minLength={authMode === "register" ? 12 : undefined} required value={password} onChange={(event) => setPassword(event.target.value)} /></label>
-            {authError && <p className="error-text">{authError}</p>}
-            <button className="button primary wide" disabled={authBusy}>{authBusy ? <LoaderCircle className="spin" size={17} /> : null}{authMode === "login" ? "Sign in" : "Create account"}<ArrowRight size={16} /></button>
+          <form onSubmit={authenticate} className="stack-form" aria-busy={authBusy}>
+            <label htmlFor="auth-email">Email address<input id="auth-email" type="email" autoComplete="username" required value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+            <label htmlFor="auth-password">Password</label>
+            <div className="password-field">
+              <input
+                id="auth-password"
+                type={showPasswords ? "text" : "password"}
+                autoComplete={authMode === "login" ? "current-password" : "new-password"}
+                minLength={authMode === "register" ? 12 : undefined}
+                required
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                aria-describedby={authMode === "register" ? "password-guidance" : undefined}
+              />
+              <button
+                className="password-toggle"
+                type="button"
+                aria-label={showPasswords ? "Hide password" : "Show password"}
+                aria-pressed={showPasswords}
+                onClick={() => setShowPasswords((visible) => !visible)}
+              >
+                {showPasswords ? "Hide" : "Show"}
+              </button>
+            </div>
+            {authMode === "register" && (
+              <>
+                <small id="password-guidance" className="auth-guidance">
+                  Use at least 12 characters, including an uppercase letter, a lowercase letter, and a number.
+                </small>
+                <label htmlFor="auth-confirm-password">Confirm password</label>
+                <input
+                  id="auth-confirm-password"
+                  type={showPasswords ? "text" : "password"}
+                  autoComplete="new-password"
+                  minLength={12}
+                  required
+                  value={confirmPassword}
+                  onChange={(event) => setConfirmPassword(event.target.value)}
+                  aria-invalid={!!confirmPassword && password !== confirmPassword}
+                  aria-describedby={confirmPassword && password !== confirmPassword ? "password-mismatch" : undefined}
+                />
+                {!!confirmPassword && password !== confirmPassword && (
+                  <small id="password-mismatch" className="error-text" role="alert">
+                    The passwords do not match.
+                  </small>
+                )}
+              </>
+            )}
+            <label className="auth-check-row">
+              <input type="checkbox" checked={rememberMe} onChange={(event) => setRememberMe(event.target.checked)} />
+              <span>Remember me on this device</span>
+            </label>
+            <small className="auth-guidance">
+              When selected, your secure session lasts until you sign out or is inactive for 400 days.
+            </small>
+            {authMode === "register" && (
+              <div className="auth-terms">
+                <p>Review the <a href="/?legal=terms" onClick={(event) => { event.preventDefault(); openLegalPage("terms"); }}>Terms of Service</a> and <a href="/?legal=privacy" onClick={(event) => { event.preventDefault(); openLegalPage("privacy"); }}>Privacy Policy</a>.</p>
+                <label className="auth-check-row">
+                  <input
+                    type="checkbox"
+                    required
+                    checked={termsAccepted}
+                    onChange={(event) => setTermsAccepted(event.target.checked)}
+                  />
+                  <span>I agree to the Terms of Service and acknowledge the Privacy Policy.</span>
+                </label>
+              </div>
+            )}
+            {authError && <p className="error-text" role="alert" aria-live="assertive">{authError}</p>}
+            <button className="button primary wide" type="submit" disabled={authBusy || (authMode === "register" && password !== confirmPassword)}>
+              {authBusy ? <LoaderCircle className="spin" size={17} aria-hidden="true" /> : null}
+              {authMode === "login" ? "Sign in" : "Create account"}
+              {!authBusy && <ArrowRight size={16} aria-hidden="true" />}
+            </button>
           </form>
-          <button className="auth-switch" onClick={() => { setAuthMode(authMode === "login" ? "register" : "login"); setAuthError(""); }}>
+          <button className="auth-switch" type="button" onClick={() => {
+            setAuthMode(authMode === "login" ? "register" : "login");
+            setAuthError("");
+            setConfirmPassword("");
+            setTermsAccepted(false);
+          }}>
             {authMode === "login" ? "New to GPD Studio? Create an account" : "Already have an account? Sign in"}
           </button>
-          <div className="auth-security"><LockKeyhole size={13} /> Channel credentials are encrypted at rest.</div>
+          <div className="auth-security"><LockKeyhole size={13} aria-hidden="true" /> Channel credentials are encrypted at rest.</div>
+          <LegalLinks onNavigate={openLegalPage} />
         </main>
-        <div className="auth-orbit orbit-one" /><div className="auth-orbit orbit-two" />
+        <div className="auth-orbit orbit-one" aria-hidden="true" /><div className="auth-orbit orbit-two" aria-hidden="true" />
+        <CookieNotice onOpenPolicy={() => openLegalPage("cookies")} />
       </div>
     );
   }
 
   return (
     <div className="app-layout">
+      <a className="skip-link" href="#main-content">Skip to main content</a>
       <aside className="sidebar">
         <a className="brand" href="#" onClick={() => setView("overview")}><span className="brand-icon">g</span><span><b>GPD Studio</b><small>Marketing workspace</small></span></a>
         <div className="side-label">WORKSPACE</div>
-        <nav className="side-nav">
-          <button className={view === "overview" ? "selected" : ""} onClick={() => setView("overview")}><Target size={17} /> Overview</button>
-          <button className={view === "channels" ? "selected" : ""} onClick={() => setView("channels")}><Send size={17} /> Channels <span className="nav-count">{accounts.length}</span></button>
-          <button className={view === "campaigns" ? "selected" : ""} onClick={() => setView("campaigns")}><CalendarDays size={17} /> Campaigns <span className="nav-count">{campaigns.length}</span></button>
-          <button className={view === "assets" ? "selected" : ""} onClick={() => setView("assets")}><FileImage size={17} /> Assets <span className="nav-count">{assets.length}</span></button>
+        <nav className="side-nav" aria-label="Main navigation">
+          <button type="button" aria-current={view === "overview" ? "page" : undefined} className={view === "overview" ? "selected" : ""} onClick={() => setView("overview")}><Target size={17} aria-hidden="true" /> Overview</button>
+          <button type="button" aria-current={view === "channels" ? "page" : undefined} className={view === "channels" ? "selected" : ""} onClick={() => setView("channels")}><Send size={17} aria-hidden="true" /> Channels <span className="nav-count">{accounts.length}</span></button>
+          <button type="button" aria-current={view === "campaigns" ? "page" : undefined} className={view === "campaigns" ? "selected" : ""} onClick={() => setView("campaigns")}><CalendarDays size={17} aria-hidden="true" /> Campaigns <span className="nav-count">{campaigns.length}</span></button>
+          <button type="button" aria-current={view === "assets" ? "page" : undefined} className={view === "assets" ? "selected" : ""} onClick={() => setView("assets")}><FileImage size={17} aria-hidden="true" /> Assets <span className="nav-count">{assets.length}</span></button>
         </nav>
         <div className="sidebar-fill" />
         <div className="side-note"><Sparkles size={15} /><b>Better stories, together.</b><p>One calm place to plan your next good idea.</p></div>
         <button className="profile-button" onClick={signOut}><span className="profile-avatar">{email.slice(0, 1).toUpperCase() || "G"}</span><span><b>{email || "Your workspace"}</b><small>Sign out</small></span><LogOut size={15} /></button>
       </aside>
 
-      <main className="main-area">
+      <main className="main-area" id="main-content" tabIndex={-1}>
         <header className="topbar">
           <div className="top-crumb">Workspace <span>/</span> <b>{view[0].toUpperCase() + view.slice(1)}</b></div>
-          <div className="top-actions"><div className={`system-status ${apiHealth}`}><i />{apiHealth === "healthy" ? "API healthy" : apiHealth === "checking" ? "Checking API" : "API unavailable"}</div><button className="icon-button" aria-label="Help"><CircleHelp size={17} /></button><button className="icon-button" aria-label="Notifications"><Bell size={17} /></button><span className="top-avatar">{email.slice(0, 1).toUpperCase() || "G"}</span></div>
+          <div className="top-actions"><div className={`system-status ${apiHealth}`} role="status" aria-live="polite"><i aria-hidden="true" />{apiHealth === "healthy" ? "API healthy" : apiHealth === "checking" ? "Checking API" : "API unavailable"}</div><a className="icon-button" href="mailto:albertmkwanda@gmail.com?subject=GPD%20Studio%20help" aria-label="Email GPD Studio support"><CircleHelp size={17} aria-hidden="true" /></a><span className="top-avatar" role="img" aria-label={`Signed in as ${email}`}>{email.slice(0, 1).toUpperCase() || "G"}</span></div>
         </header>
 
         <div className="page-content">
@@ -655,7 +859,7 @@ export default function App() {
             <div className="date-chip"><CalendarDays size={15} /> {new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(new Date())}</div>
           </section>
 
-          {(error || message) && <div className={`notice ${error ? "notice-error" : ""}`} role="status"><span>{error || message}</span><button aria-label="Dismiss" onClick={() => { setError(""); setMessage(""); }}><X size={15} /></button></div>}
+          {(error || message) && <div className={`notice ${error ? "notice-error" : ""}`} role={error ? "alert" : "status"} aria-live={error ? "assertive" : "polite"}><span>{error || message}</span><button type="button" aria-label="Dismiss notification" onClick={() => { setError(""); setMessage(""); }}><X size={15} aria-hidden="true" /></button></div>}
 
           <div className="metric-grid">
             <article className="metric-card"><span className="metric-icon green"><Send size={17} /></span><span className="metric-label">SAVED CHANNELS</span><strong>{accounts.length}<small> / 4</small></strong><p>{channelCount} platforms represented</p></article>
@@ -705,7 +909,11 @@ export default function App() {
               </div>
             )}
           </section>
-          <footer className="footer-line"><span>GPD MARKETING STUDIO</span><span>Make it useful. Make it human.</span></footer>
+          <footer className="footer-line">
+            <span>GPD MARKETING STUDIO</span>
+            <span>Make it useful. Make it human.</span>
+            <LegalLinks onNavigate={openLegalPage} />
+          </footer>
         </div>
       </main>
 
@@ -789,7 +997,10 @@ export default function App() {
           <label>What are you marketing?<textarea required minLength={10} maxLength={5000} rows={3} value={campaign.objective} onChange={(event) => setCampaign({ ...campaign, objective: event.target.value })} placeholder="Describe the product, service, offer, or community goal." /></label>
           <fieldset><legend>Choose marketing strategies</legend><div className="strategy-grid">{strategyOptions.map(([id, label]) => <label className="check-option" key={id}><input type="checkbox" checked={campaign.strategies.includes(id)} onChange={(event) => setCampaign({ ...campaign, strategies: event.target.checked ? [...campaign.strategies, id] : campaign.strategies.filter((item) => item !== id) })} /><span><Check size={12} /></span>{label}</label>)}</div></fieldset>
           <label>Voice / post style<input required maxLength={80} value={campaign.tone} onChange={(event) => setCampaign({ ...campaign, tone: event.target.value })} placeholder="Warm, witty, educational…" /></label>
-          <label>Target countries, regions and cities <small>Enter JSON lists.</small><textarea rows={2} value={campaign.geography} onChange={(event) => setCampaign({ ...campaign, geography: event.target.value })} /></label>
+          <GeographyPicker
+            value={campaign.geography}
+            onChange={(geography) => setCampaign({ ...campaign, geography })}
+          />
           <div className="form-pair"><label>Start date &amp; time<input type="datetime-local" required value={campaign.starts_at} onChange={(event) => setCampaign({ ...campaign, starts_at: event.target.value })} /></label><label>End date &amp; time<input type="datetime-local" required value={campaign.ends_at} onChange={(event) => setCampaign({ ...campaign, ends_at: event.target.value })} /></label></div>
           <label>Timezone<input required value={campaign.timezone} onChange={(event) => setCampaign({ ...campaign, timezone: event.target.value })} /></label>
           <fieldset><legend>AI scheduling</legend>
@@ -844,6 +1055,7 @@ export default function App() {
           }) : <div className="empty-state compact"><b>No posts planned yet</b><p>Generate a plan or create an individual scheduled post.</p></div>}
         </div>
       </Modal>}
+      <CookieNotice onOpenPolicy={() => openLegalPage("cookies")} />
     </div>
   );
 }
@@ -869,11 +1081,68 @@ function SetupStep({ number, title, text, action, onAction, icon }: { number: st
 }
 
 function Modal({ title, description, onClose, children }: { title: string; description: string; onClose: () => void; children: React.ReactNode }) {
+  const titleId = useId();
+  const descriptionId = useId();
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
-    function onKey(event: KeyboardEvent) { if (event.key === "Escape") onClose(); }
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeButtonRef.current?.focus();
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(
+        'a[href],button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex]:not([tabindex="-1"])',
+      )).filter((element) => element.getClientRects().length > 0);
+      if (!focusable.length) {
+        event.preventDefault();
+        dialogRef.current.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !dialogRef.current.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !dialogRef.current.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
     window.addEventListener("keydown", onKey);
     document.body.classList.add("modal-open");
-    return () => { window.removeEventListener("keydown", onKey); document.body.classList.remove("modal-open"); };
-  }, [onClose]);
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><header><div><h2 id="modal-title">{title}</h2><p>{description}</p></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button></header>{children}</section></div>;
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.classList.remove("modal-open");
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, []);
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onCloseRef.current(); }}>
+      <section
+        ref={dialogRef}
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        tabIndex={-1}
+      >
+        <header>
+          <div><h2 id={titleId}>{title}</h2><p id={descriptionId}>{description}</p></div>
+          <button ref={closeButtonRef} type="button" className="icon-button" onClick={() => onCloseRef.current()} aria-label="Close dialog">
+            <X size={18} aria-hidden="true" />
+          </button>
+        </header>
+        {children}
+      </section>
+    </div>
+  );
 }

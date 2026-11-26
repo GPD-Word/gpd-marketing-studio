@@ -37,7 +37,7 @@ export interface Campaign {
   objective: string;
   strategies: string[];
   tone: string;
-  geography: Record<string, unknown>;
+  geography: CampaignGeography;
   planning_preferences: {
     schedule_mode: "auto" | "specific_times";
     specific_times: string[];
@@ -50,6 +50,13 @@ export interface Campaign {
   timezone: string;
   account_ids: string[];
   created_at: string;
+}
+
+export interface CampaignGeography {
+  countries: string[];
+  regions: string[];
+  cities: string[];
+  districts: string[];
 }
 
 export interface ScheduledPost {
@@ -101,13 +108,18 @@ export interface CloudinaryUploadResult {
 }
 
 export const API_URL = import.meta.env.VITE_API_URL ?? "";
+const API_REQUEST_BASE = import.meta.env.DEV ? API_URL : "";
 
 export async function api<T>(path: string, token?: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
-  const response = await fetch(`${API_URL}${path}`, { ...init, headers });
+  const response = await fetch(`${API_REQUEST_BASE}${path}`, {
+    ...init,
+    credentials: "include",
+    headers,
+  });
   const payload = response.status === 204 ? undefined : await response.json().catch(() => undefined);
   if (!response.ok) {
     const detail = payload && typeof payload.detail === "string" ? payload.detail : `Request failed (${response.status}).`;
