@@ -78,6 +78,7 @@ export interface ScheduledPost {
 
 export interface MarketingAsset {
   id: string;
+  account_id: string | null;
   original_name: string;
   media_type: string;
   description: string;
@@ -86,6 +87,24 @@ export interface MarketingAsset {
   analysis_status: string;
   download_url: string;
   created_at: string;
+}
+
+export interface CampaignGenerationJob {
+  campaign_id: string;
+  status: string;
+  posts_per_day: number;
+  auto_approve: boolean;
+  generated_batches: number;
+  next_run_at: string;
+  last_error: string | null;
+}
+
+export interface PublishingSummary {
+  scheduled: number;
+  processing: number;
+  published: number;
+  failed: number;
+  needs_attention: number;
 }
 
 export interface CloudinaryUploadIntent {

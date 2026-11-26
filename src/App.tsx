@@ -9,6 +9,7 @@ import {
   API_URL,
   type AIProviderConfig,
   type Campaign,
+  type CampaignGenerationJob,
   type CampaignGeography,
   type CloudinaryUploadIntent,
   type CloudinaryUploadResult,
@@ -16,6 +17,7 @@ import {
   type MarketingAsset,
   type PageProfile,
   type Platform,
+  type PublishingSummary,
   type ScheduledPost,
   type SocialAccount,
 } from "./api";
@@ -98,8 +100,19 @@ export default function App() {
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [assets, setAssets] = useState<MarketingAsset[]>([]);
+  const [generationJobs, setGenerationJobs] = useState<CampaignGenerationJob[]>([]);
+  const [publishingSummary, setPublishingSummary] = useState<PublishingSummary>({
+    scheduled: 0,
+    processing: 0,
+    published: 0,
+    failed: 0,
+    needs_attention: 0,
+  });
   const [view, setView] = useState<View>("overview");
   const [busy, setBusy] = useState(false);
+  const [planningCampaignId, setPlanningCampaignId] = useState("");
+  const [postsPerDay, setPostsPerDay] = useState(1);
+  const [autoApprovePosts, setAutoApprovePosts] = useState(true);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [showAccountForm, setShowAccountForm] = useState(false);
@@ -122,6 +135,8 @@ export default function App() {
   const [savedAIProviders, setSavedAIProviders] = useState<AIProviderConfig[]>([]);
   const [assetFile, setAssetFile] = useState<File | null>(null);
   const [assetUrl, setAssetUrl] = useState("");
+  const [assetAccountId, setAssetAccountId] = useState("");
+  const [assetAssignmentAccounts, setAssetAssignmentAccounts] = useState<Record<string, string>>({});
   const [account, setAccount] = useState({
     platform: "facebook" as Platform,
     display_name: "",
@@ -215,19 +230,51 @@ export default function App() {
   }, [token, tokenExpiresAt]);
 
   async function refreshData(activeToken: string) {
-    const [nextAccounts, nextCampaigns, nextAssets] = await Promise.all([
+    const [nextAccounts, nextCampaigns, nextAssets, generationResponse, nextPublishingSummary] = await Promise.all([
       api<SocialAccount[]>("/api/accounts", activeToken),
       api<Campaign[]>("/api/campaigns", activeToken),
       api<MarketingAsset[]>("/api/assets", activeToken),
+      api<{ jobs: CampaignGenerationJob[] }>("/api/campaign-generations", activeToken),
+      api<PublishingSummary>("/api/publishing/summary", activeToken),
     ]);
     setAccounts(nextAccounts);
     setCampaigns(nextCampaigns);
     setAssets(nextAssets);
+    setGenerationJobs(generationResponse.jobs);
+    setPublishingSummary(nextPublishingSummary);
+    setAssetAccountId((current) => nextAccounts.some((item) => item.id === current)
+      ? current
+      : nextAccounts[0]?.id ?? "");
   }
 
   useEffect(() => {
     if (!token) return;
     refreshData(token).catch((cause: Error) => setError(cause.message));
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) return undefined;
+    let active = true;
+    async function refreshAutomationStatus() {
+      try {
+        const [generationResponse, nextPublishingSummary] = await Promise.all([
+          api<{ jobs: CampaignGenerationJob[] }>("/api/campaign-generations", token),
+          api<PublishingSummary>("/api/publishing/summary", token),
+        ]);
+        if (active) {
+          setGenerationJobs(generationResponse.jobs);
+          setPublishingSummary(nextPublishingSummary);
+        }
+      } catch (cause) {
+        if (active) setError((cause as Error).message);
+      }
+    }
+    void refreshAutomationStatus();
+    const timer = window.setInterval(refreshAutomationStatus, 30000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
   }, [token]);
 
   useEffect(() => {
@@ -476,23 +523,68 @@ export default function App() {
     setError("");
   }
 
-  async function generateCampaignPlan(item: Campaign) {
+  async function generateCampaignPlan(item: Campaign, rolling = false) {
     setBusy(true);
+    setPlanningCampaignId(item.id);
     setError("");
     setMessage("");
     try {
-      const result = await api<{ posts_created: number; days_planned: number; news_headlines_used: number }>(
+      const result = await api<{
+        posts_created: number;
+        days_planned: number;
+        news_headlines_used: number;
+        rolling_generation: boolean;
+        next_batch_at: string | null;
+        requires_review: boolean;
+      }>(
         `/api/campaigns/${item.id}/generate-plan`,
         token,
-        { method: "POST", body: JSON.stringify({ days: 7, offset_days: 0 }) },
+        {
+          method: "POST",
+          body: JSON.stringify({
+            days: 7,
+            offset_days: 0,
+            posts_per_day: postsPerDay,
+            rolling_generation: rolling,
+            auto_approve: autoApprovePosts,
+          }),
+        },
       );
       await refreshData(token);
-      setMessage(`AI chose a ${result.posts_created}-post cadence across ${result.days_planned} days; ${result.news_headlines_used} news headlines were available. Review each post before publishing.`);
+      const reviewMessage = result.requires_review
+        ? "Review every draft before approving it for publishing."
+        : "Generated posts are approved and may publish automatically at their scheduled times.";
+      const rollingMessage = result.rolling_generation && result.next_batch_at
+        ? ` The next seven-day batch is scheduled for ${new Date(result.next_batch_at).toLocaleString()}.`
+        : "";
+      setMessage(
+        `Created ${result.posts_created} posts across ${result.days_planned} days at ${postsPerDay} post${postsPerDay === 1 ? "" : "s"} per page per day; ${result.news_headlines_used} news headlines were available. ${reviewMessage}${rollingMessage}`,
+      );
       await openCampaignPosts(item);
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
       setBusy(false);
+      setPlanningCampaignId("");
+    }
+  }
+
+  async function resumeCampaignGeneration(item: Campaign) {
+    setBusy(true);
+    setPlanningCampaignId(item.id);
+    setError("");
+    setMessage("");
+    try {
+      await api<CampaignGenerationJob>(`/api/campaign-generations/${item.id}/resume`, token, {
+        method: "POST",
+      });
+      await refreshData(token);
+      setMessage(`Rolling generation for “${item.name}” has been resumed from its next ungenerated batch. The worker will process it on its next run.`);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+      setPlanningCampaignId("");
     }
   }
 
@@ -625,7 +717,10 @@ export default function App() {
 
   async function uploadAsset(event: React.FormEvent) {
     event.preventDefault();
-    if (!assetFile) return;
+    if (!assetFile || !assetAccountId) {
+      setError("Choose the page that owns this media before uploading.");
+      return;
+    }
     setBusy(true);
     setError("");
     setMessage("");
@@ -633,6 +728,7 @@ export default function App() {
       const intent = await api<CloudinaryUploadIntent>("/api/assets/upload-signature", token, {
         method: "POST",
         body: JSON.stringify({
+          account_id: assetAccountId,
           media_type: assetFile.type,
           original_name: assetFile.name,
           file_size: assetFile.size,
@@ -647,6 +743,7 @@ export default function App() {
           signature: uploaded.signature,
           resource_type: uploaded.resource_type,
           original_name: assetFile.name,
+          account_id: assetAccountId,
         }),
       });
       await refreshData(token);
@@ -661,13 +758,17 @@ export default function App() {
 
   async function importAssetFromUrl(event: React.FormEvent) {
     event.preventDefault();
+    if (!assetAccountId) {
+      setError("Choose the page that owns this media before importing.");
+      return;
+    }
     setBusy(true);
     setError("");
     setMessage("");
     try {
       const intent = await api<CloudinaryUploadIntent>("/api/assets/from-url", token, {
         method: "POST",
-        body: JSON.stringify({ url: assetUrl }),
+        body: JSON.stringify({ account_id: assetAccountId, url: assetUrl }),
       });
       const uploaded = await uploadToCloudinary(assetUrl, intent);
       const originalName = decodeURIComponent(new URL(assetUrl).pathname.split("/").pop() || "external-media");
@@ -679,6 +780,7 @@ export default function App() {
           signature: uploaded.signature,
           resource_type: uploaded.resource_type,
           original_name: originalName,
+          account_id: assetAccountId,
         }),
       });
       await refreshData(token);
@@ -689,6 +791,59 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function assignAssetToAccount(asset: MarketingAsset) {
+    const accountId = assetAssignmentAccounts[asset.id];
+    if (!accountId) {
+      setError("Choose a page before assigning this existing asset.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await api<MarketingAsset>(`/api/assets/${asset.id}/account`, token, {
+        method: "PUT",
+        body: JSON.stringify({ account_id: accountId }),
+      });
+      await refreshData(token);
+      setMessage(`“${asset.original_name}” is now organized under ${accounts.find((item) => item.id === accountId)?.display_name ?? "the selected page"}.`);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function renderAssetCard(item: MarketingAsset) {
+    return (
+      <article className="asset-card" key={item.id}>
+        {item.analysis_status === "needs_reupload"
+          ? <div className="asset-unavailable">This asset is in the previous storage provider. Re-upload it to Cloudinary to use it.</div>
+          : item.media_type.startsWith("video/")
+            ? <video controls playsInline preload="metadata" aria-label={item.description || item.original_name}><source src={item.download_url} type={item.media_type} /></video>
+            : <img src={item.download_url} alt={item.description || item.original_name} />}
+        <div className="asset-card-copy">
+          <b>{item.original_name}</b>
+          <small className="asset-description">{item.description}</small>
+          <small>{item.analysis_status === "complete" ? item.labels.slice(0, 5).join(" · ") : item.analysis_status === "needs_reupload" ? "Re-upload required" : "Analysis pending"}</small>
+        </div>
+        {item.account_id === null && accounts.length > 0 && (
+          <div className="asset-assignment">
+            <label htmlFor={`asset-account-${item.id}`}>Assign legacy asset to a page</label>
+            <select
+              id={`asset-account-${item.id}`}
+              value={assetAssignmentAccounts[item.id] ?? ""}
+              onChange={(event) => setAssetAssignmentAccounts((current) => ({ ...current, [item.id]: event.target.value }))}
+            >
+              <option value="">Choose page</option>
+              {accounts.map((channel) => <option value={channel.id} key={channel.id}>{channel.display_name} · {channel.platform}</option>)}
+            </select>
+            <button type="button" className="button secondary" disabled={busy || !assetAssignmentAccounts[item.id]} onClick={() => assignAssetToAccount(item)}>Assign to page</button>
+          </div>
+        )}
+      </article>
+    );
   }
 
   async function signOut() {
@@ -702,6 +857,8 @@ export default function App() {
       setAccounts([]);
       setCampaigns([]);
       setAssets([]);
+      setGenerationJobs([]);
+      setPublishingSummary({ scheduled: 0, processing: 0, published: 0, failed: 0, needs_attention: 0 });
       setEmail("");
       setView("overview");
     }
@@ -864,7 +1021,7 @@ export default function App() {
           <div className="metric-grid">
             <article className="metric-card"><span className="metric-icon green"><Send size={17} /></span><span className="metric-label">SAVED CHANNELS</span><strong>{accounts.length}<small> / 4</small></strong><p>{channelCount} platforms represented</p></article>
             <article className="metric-card"><span className="metric-icon lilac"><CalendarDays size={17} /></span><span className="metric-label">ACTIVE CAMPAIGNS</span><strong>{campaigns.length}</strong><p>Across your connected pages</p></article>
-            <article className="metric-card"><span className="metric-icon amber"><Clock3 size={17} /></span><span className="metric-label">SCHEDULED POSTS</span><strong>—</strong><p>Publishing jobs not connected yet</p></article>
+            <article className="metric-card"><span className="metric-icon amber"><Clock3 size={17} /></span><span className="metric-label">SCHEDULED POSTS</span><strong>{publishingSummary.scheduled + publishingSummary.processing}</strong><p>{publishingSummary.published} published · {publishingSummary.needs_attention + publishingSummary.failed} need attention</p></article>
             <article className="metric-card"><span className="metric-icon rose"><HeartHandshake size={17} /></span><span className="metric-label">ASSETS ANALYZED</span><strong>{assets.length}</strong><p>Images described and labeled</p></article>
           </div>
 
@@ -879,24 +1036,93 @@ export default function App() {
             </div>
 
             {view === "campaigns" ? (
-              campaigns.length ? <div className="campaign-list">{campaigns.map((item) => <article className="campaign-row" key={item.id}><span className="campaign-icon"><Target size={17} /></span><div className="campaign-main"><b>{item.name}</b><p>{item.objective}</p><div className="tag-row">{item.strategies.map((strategy) => <span className="tag" key={strategy}>{strategy.replace("-", " ")}</span>)}</div></div><div className="campaign-date">{new Date(item.starts_at).toLocaleDateString()} – {new Date(item.ends_at).toLocaleDateString()}</div><div className="campaign-actions"><button className="button secondary" disabled={busy || !item.account_ids.length} onClick={() => generateCampaignPlan(item)}>Generate 7-day plan</button><button className="button secondary" onClick={() => openCampaignPosts(item)}>Review posts</button><button className="button secondary" onClick={() => openScheduleForm(item)} disabled={!item.account_ids.length}>Create post</button></div></article>)}</div> : <EmptyState icon={<CalendarDays size={21} />} title="No campaigns just yet" text="Create a campaign to define your goal, audience, tone, and channels." action="Create campaign" onAction={() => setShowCampaignForm(true)} />
+              campaigns.length ? <>
+                <div className="campaign-generation-settings">
+                  <label>Posts per page, per day
+                    <select value={postsPerDay} onChange={(event) => setPostsPerDay(Number(event.target.value))}>
+                      <option value={1}>1 post</option>
+                      <option value={2}>2 posts</option>
+                      <option value={3}>3 posts</option>
+                    </select>
+                  </label>
+                  <label className="auto-approve-option">
+                    <input type="checkbox" checked={autoApprovePosts} onChange={(event) => setAutoApprovePosts(event.target.checked)} />
+                    <span>Auto-approve generated posts</span>
+                  </label>
+                  <p>Auto-approved posts can publish automatically when their scheduled time arrives. Turn this off to review every post first.</p>
+                </div>
+                {planningCampaignId && (
+                  <div className="generation-progress" role="status" aria-live="polite" aria-busy="true">
+                    <LoaderCircle className="spin" size={18} aria-hidden="true" />
+                    <div><b>Building your campaign plan</b><span>Creating post copy and page-specific imagery. This can take a few minutes.</span></div>
+                    <span className="generation-progress-bar" aria-hidden="true" />
+                  </div>
+                )}
+                <div className="campaign-list">{campaigns.map((item) => {
+                  const generation = generationJobs.find((job) => job.campaign_id === item.id);
+                  return <article className="campaign-row" key={item.id}>
+                    <span className="campaign-icon"><Target size={17} /></span>
+                    <div className="campaign-main">
+                      <b>{item.name}</b><p>{item.objective}</p>
+                      <div className="tag-row">{item.strategies.map((strategy) => <span className="tag" key={strategy}>{strategy.replace("-", " ")}</span>)}</div>
+                      {generation && <small className={`generation-status ${generation.status === "failed" ? "failed" : ""}`}>
+                        {generation.status === "active"
+                          ? `Rolling generation · batch ${generation.generated_batches} · next run ${new Date(generation.next_run_at).toLocaleString()}`
+                          : generation.status === "processing"
+                            ? "Generating the next campaign batch…"
+                            : generation.status === "failed"
+                              ? `Rolling generation paused: ${generation.last_error || "The last batch failed."}`
+                              : `Campaign generation ${generation.status}`}
+                      </small>}
+                    </div>
+                    <div className="campaign-date">{new Date(item.starts_at).toLocaleDateString()} – {new Date(item.ends_at).toLocaleDateString()}</div>
+                    <div className="campaign-actions">
+                      <button className="button secondary" disabled={busy || !item.account_ids.length} onClick={() => generateCampaignPlan(item)}>Generate 7 days</button>
+                      <button className="button secondary" disabled={busy || !item.account_ids.length || generation?.status === "active" || generation?.status === "processing" || generation?.status === "completed"} onClick={() => generation?.status === "failed" ? resumeCampaignGeneration(item) : generateCampaignPlan(item, true)}>{generation?.status === "failed" ? "Resume rolling" : generation?.status === "active" ? "Rolling active" : generation?.status === "completed" ? "Rolling complete" : "Generate campaign"}</button>
+                      <button className="button secondary" onClick={() => openCampaignPosts(item)}>Review posts</button>
+                      <button className="button secondary" onClick={() => openScheduleForm(item)} disabled={!item.account_ids.length}>Create post</button>
+                    </div>
+                  </article>;
+                })}</div>
+              </> : <EmptyState icon={<CalendarDays size={21} />} title="No campaigns just yet" text="Create a campaign to define your goal, audience, tone, and channels." action="Create campaign" onAction={() => setShowCampaignForm(true)} />
             ) : view === "channels" ? (
               accounts.length ? <div className="channel-grid">{accounts.map((item) => <ChannelCard key={item.id} account={item} onRemove={disconnectAccount} onAIConfigure={openAISettings} onValidate={validateAccount} onProfile={openProfileSettings} onTikTokSetup={openTikTokSetup} />)}<button className="add-channel-card" onClick={() => setShowAccountForm(true)}><span><Plus size={19} /></span><b>Connect another channel</b><small>Facebook · Instagram · X · TikTok</small></button></div> : <EmptyState icon={<Send size={21} />} title="Your social channels live here" text="Connect a page or profile to start building cross-channel campaigns." action="Connect a channel" onAction={() => setShowAccountForm(true)} />
             ) : view === "assets" ? (
               <div className="asset-library">
+                <label className="asset-page-select" htmlFor="asset-page-select">Save new media under
+                  <select id="asset-page-select" required value={assetAccountId} onChange={(event) => setAssetAccountId(event.target.value)} disabled={!accounts.length}>
+                    <option value="">Choose a page</option>
+                    {accounts.map((channel) => <option value={channel.id} key={channel.id}>{channel.display_name} · {channel.platform}</option>)}
+                  </select>
+                </label>
+                {!accounts.length && <p className="form-hint">Connect a social channel before uploading assets so each file has a clear page owner.</p>}
                 <form className="asset-upload" onSubmit={uploadAsset}>
                   <input id="asset-file-input" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime" onChange={(event) => setAssetFile(event.target.files?.[0] ?? null)} />
                   <div className="asset-upload-icon"><ImagePlus size={19} /></div>
                   <b>{assetFile ? assetFile.name : "Choose an image or video file"}</b>
                   <small>JPEG, PNG, WebP or video · images up to 12 MB · videos up to 100 MB</small>
-                  <div className="asset-upload-actions"><button type="button" className="button secondary" onClick={() => document.getElementById("asset-file-input")?.click()}><FileImage size={14} /> Choose file</button><button type="submit" className="button primary" disabled={!assetFile || busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />} Upload &amp; analyze</button></div>
+                  <div className="asset-upload-actions"><button type="button" className="button secondary" disabled={!accounts.length} onClick={() => document.getElementById("asset-file-input")?.click()}><FileImage size={14} /> Choose file</button><button type="submit" className="button primary" disabled={!assetFile || !assetAccountId || busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />} Upload &amp; analyze</button></div>
                 </form>
                 <form className="asset-url-import" onSubmit={importAssetFromUrl}>
                   <label htmlFor="asset-url-input">Or import a direct media link</label>
-                  <div><input id="asset-url-input" type="url" required inputMode="url" placeholder="https://example.com/campaign-image.jpg" value={assetUrl} onChange={(event) => setAssetUrl(event.target.value)} /><button className="button secondary" type="submit" disabled={!assetUrl || busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <ArrowRight size={14} />} Import URL</button></div>
+                  <div><input id="asset-url-input" type="url" required inputMode="url" placeholder="https://example.com/campaign-image.jpg" value={assetUrl} onChange={(event) => setAssetUrl(event.target.value)} /><button className="button secondary" type="submit" disabled={!assetUrl || !assetAccountId || busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <ArrowRight size={14} />} Import URL</button></div>
                   <small>Public HTTPS direct-media links · images up to 12 MB, videos up to 100 MB · no redirects</small>
                 </form>
-                {assets.length ? <div className="asset-grid">{assets.map((item) => <article className="asset-card" key={item.id}>{item.analysis_status === "needs_reupload" ? <div className="asset-unavailable">This asset is in the previous storage provider. Re-upload it to Cloudinary to use it.</div> : item.media_type.startsWith("video/") ? <video controls playsInline preload="metadata" aria-label={item.description || item.original_name}><source src={item.download_url} type={item.media_type} /></video> : <img src={item.download_url} alt={item.description || item.original_name} />}<div className="asset-card-copy"><b>{item.original_name}</b><small className="asset-description">{item.description}</small><small>{item.analysis_status === "complete" ? item.labels.slice(0, 5).join(" · ") : item.analysis_status === "needs_reupload" ? "Re-upload required" : "Analysis pending"}</small></div></article>)}</div> : <EmptyState icon={<FileImage size={21} />} title="Your library starts with an image or video" text="Upload or link campaign media and the inference service will return an AI description and labels." action="Choose a file" onAction={() => document.getElementById("asset-file-input")?.click()} />}
+                {assets.length ? <>
+                  {accounts.map((channel) => {
+                    const pageAssets = assets.filter((item) => item.account_id === channel.id);
+                    return <section className="asset-page-group" key={channel.id}>
+                      <header><div><b>{channel.display_name}</b><small>{channel.platform}</small></div><span>{pageAssets.length} asset{pageAssets.length === 1 ? "" : "s"}</span></header>
+                      {pageAssets.length
+                        ? <div className="asset-grid">{pageAssets.map(renderAssetCard)}</div>
+                        : <p className="asset-page-empty">No media saved for this page yet.</p>}
+                    </section>;
+                  })}
+                  {assets.some((item) => item.account_id === null) && <section className="asset-page-group">
+                    <header><div><b>Unassigned legacy assets</b><small>These assets are not available to campaign generation until assigned.</small></div></header>
+                    <div className="asset-grid">{assets.filter((item) => item.account_id === null).map(renderAssetCard)}</div>
+                  </section>}
+                </> : <EmptyState icon={<FileImage size={21} />} title="Your library starts with an image or video" text="Upload or link campaign media and the inference service will return an AI description and labels." action="Choose a file" onAction={() => document.getElementById("asset-file-input")?.click()} />}
               </div>
             ) : (
               <div className="overview-grid">
@@ -969,7 +1195,7 @@ export default function App() {
         <form className="modal-form" onSubmit={saveProfileSettings}>
           <label>Preferred languages <small>Posts use one language each. The planner can create separate variants when it judges them useful.</small><select multiple size={5} required value={profileDraft.languages} onChange={(event) => setProfileDraft({ ...profileDraft, languages: Array.from(event.target.selectedOptions, (option) => option.value) })}><option value="en">English</option><option value="es">Spanish</option><option value="fr">French</option><option value="pt">Portuguese</option><option value="sw">Swahili</option><option value="ar">Arabic</option><option value="zh">Chinese</option><option value="de">German</option><option value="hi">Hindi</option></select></label>
           <div className="form-pair"><label>Primary color<input type="color" value={profileDraft.primary_color} onChange={(event) => setProfileDraft({ ...profileDraft, primary_color: event.target.value })} /></label><label>Accent color<input type="color" value={profileDraft.accent_color} onChange={(event) => setProfileDraft({ ...profileDraft, accent_color: event.target.value })} /></label></div>
-          <div className="form-pair"><label>Image font<select value={profileDraft.font_family} onChange={(event) => setProfileDraft({ ...profileDraft, font_family: event.target.value as PageProfile["font_family"] })}><option value="sans">Sans-serif</option><option value="serif">Serif</option><option value="display">Display</option></select></label><label>Brand logo<select value={profileDraft.logo_asset_id ?? ""} onChange={(event) => setProfileDraft({ ...profileDraft, logo_asset_id: event.target.value || null })}><option value="">No logo</option>{assets.filter((asset) => asset.media_type.startsWith("image/")).map((asset) => <option value={asset.id} key={asset.id}>{asset.original_name}</option>)}</select></label></div>
+          <div className="form-pair"><label>Image font<select value={profileDraft.font_family} onChange={(event) => setProfileDraft({ ...profileDraft, font_family: event.target.value as PageProfile["font_family"] })}><option value="sans">Sans-serif</option><option value="serif">Serif</option><option value="display">Display</option></select></label><label>Brand logo<select value={profileDraft.logo_asset_id ?? ""} onChange={(event) => setProfileDraft({ ...profileDraft, logo_asset_id: event.target.value || null })}><option value="">No logo</option>{assets.filter((asset) => asset.account_id === profileAccount.id && asset.media_type.startsWith("image/")).map((asset) => <option value={asset.id} key={asset.id}>{asset.original_name}</option>)}</select></label></div>
           <label>Faith presentation<select value={profileDraft.faith_presentation} onChange={(event) => setProfileDraft({ ...profileDraft, faith_presentation: event.target.value as PageProfile["faith_presentation"] })}><option value="subtle">Subtle: principles reflected, no explicit religious terms</option><option value="explicit">Explicit: page may mention faith and Scripture references</option><option value="off">Off: no faith editorial guidance</option></select></label>
           <p className="form-hint"><LockKeyhole size={13} /> The default is subtle, with no verse quotations. Bible references are restricted to reviewed references and included as internal review metadata.</p>
           <div className="modal-actions"><button type="button" className="button secondary" onClick={() => { setProfileAccount(null); setProfileDraft(null); }}>Cancel</button><button className="button primary" disabled={busy}>{busy ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />} Save page profile</button></div>
@@ -1018,8 +1244,8 @@ export default function App() {
 
       {scheduleCampaign && <Modal title="Schedule a post" description="Generate copy with this page's AI provider, review it, then choose a publication time." onClose={() => setScheduleCampaign(null)}>
         <form className="modal-form" onSubmit={saveScheduledPost}>
-          <label>Channel<select required value={scheduleForm.account_id} onChange={(event) => setScheduleForm({ ...scheduleForm, account_id: event.target.value })}>{accounts.filter((item) => scheduleCampaign.account_ids.includes(item.id)).map((item) => <option value={item.id} key={item.id}>{item.display_name} · {item.platform}</option>)}</select></label>
-          <label>Media asset<select value={scheduleForm.asset_id} onChange={(event) => setScheduleForm({ ...scheduleForm, asset_id: event.target.value })}><option value="">Text only</option>{assets.map((item) => <option value={item.id} key={item.id}>{item.original_name} · {item.media_type}</option>)}</select></label>
+          <label>Channel<select required value={scheduleForm.account_id} onChange={(event) => setScheduleForm({ ...scheduleForm, account_id: event.target.value, asset_id: "" })}>{accounts.filter((item) => scheduleCampaign.account_ids.includes(item.id)).map((item) => <option value={item.id} key={item.id}>{item.display_name} · {item.platform}</option>)}</select></label>
+          <label>Media asset<select value={scheduleForm.asset_id} onChange={(event) => setScheduleForm({ ...scheduleForm, asset_id: event.target.value })}><option value="">Text only</option>{assets.filter((item) => item.account_id === scheduleForm.account_id).map((item) => <option value={item.id} key={item.id}>{item.original_name} · {item.media_type}</option>)}</select></label>
           <label>Post copy<textarea required minLength={1} maxLength={5000} rows={5} value={scheduleForm.text} onChange={(event) => setScheduleForm({ ...scheduleForm, text: event.target.value })} placeholder="Write or generate copy, then review it before scheduling." /></label>
           <div className="form-pair"><button type="button" className="button secondary" onClick={generateScheduledCopy} disabled={busy || !scheduleForm.account_id}>{busy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />} Generate copy</button><label>Publish time<input type="datetime-local" required value={scheduleForm.scheduled_at} onChange={(event) => setScheduleForm({ ...scheduleForm, scheduled_at: event.target.value })} /></label></div>
           <p className="form-hint"><Check size={13} /> Scheduled posts publish automatically after channel validation. You can cancel them while still queued.</p>
@@ -1027,7 +1253,7 @@ export default function App() {
         </form>
       </Modal>}
 
-      {postsCampaign && <Modal title={`${postsCampaign.name} posts`} description="AI-planned posts stay in draft until you approve them. Queued posts publish through the channel's official API." onClose={() => setPostsCampaign(null)}>
+      {postsCampaign && <Modal title={`${postsCampaign.name} posts`} description="Review generated content and its page-specific media. Auto-approved posts can publish through the configured worker." onClose={() => setPostsCampaign(null)}>
         <div className="scheduled-post-list">
           {campaignPosts.length ? campaignPosts.map((post) => {
             const channel = accounts.find((item) => item.id === post.account_id);

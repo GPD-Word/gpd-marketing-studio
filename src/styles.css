@@ -27,3 +27,28 @@
 @media(max-width:520px){.asset-upload-actions{flex-wrap:wrap;justify-content:center}.asset-upload-actions .button{flex:1}.asset-grid{gap:7px}.asset-card-copy{padding:7px}}
 .geography-picker{display:grid;gap:10px}.geography-block{display:grid;gap:8px;padding:10px;border:1px solid #e7ece7;border-radius:8px}.geography-block legend{padding:0 5px;color:#536158;font-size:12px;font-weight:700}.geography-block>small{color:#85928a;font-size:12px;line-height:1.45}.geography-search{display:grid;gap:5px;color:#536158;font-size:12px;font-weight:600}.geography-search input{min-height:34px!important}.geography-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;max-height:190px;overflow:auto;padding:2px}.geography-option{min-width:0;align-items:flex-start!important;overflow-wrap:anywhere}.geography-flag{width:18px;flex:0 0 18px;font-size:12px}.geography-district{display:grid;gap:7px;padding:9px;border:1px solid #edf0ed;border-radius:7px;background:#fcfdfb}.geography-district>strong{color:#536158;font-size:12px}.geography-add-row{display:flex;align-items:center;gap:7px}.geography-add-row input{min-width:0;flex:1}.geography-add-row .button{min-height:34px;padding:0 12px;font-size:12px}.geography-picker .form-hint{margin-top:0}
 @media(max-width:520px){.geography-options{grid-template-columns:1fr}.geography-block{padding:8px}.geography-add-row .button{min-width:62px}}
+.asset-page-select{display:grid;grid-template-columns:minmax(120px,1fr) minmax(180px,2fr);align-items:center;gap:12px;margin:0 0 12px;color:#536158;font-size:12px;font-weight:700}
+.asset-page-select select,.asset-assignment select,.campaign-generation-settings select{min-width:0;min-height:36px;padding:7px 9px;border:1px solid #e2e9e3;border-radius:7px;background:#fff;color:#47574c;font-size:12px}
+.asset-page-group{margin-top:19px;padding-top:13px;border-top:1px solid #edf0ed}
+.asset-page-group>header{display:flex;align-items:center;justify-content:space-between;gap:12px;color:#526158;font-size:12px}
+.asset-page-group>header>div{display:grid;gap:3px}
+.asset-page-group>header small,.asset-page-group>header>span{color:#8d9990;font-size:12px}
+.asset-page-group .asset-grid{margin-top:4px}
+.asset-page-empty{margin:12px 0 0;color:#929d95;font-size:12px}
+.asset-assignment{display:grid;gap:7px;padding:9px}
+.asset-assignment label{color:#68776d;font-size:12px;font-weight:600}
+.asset-assignment .button{justify-self:start}
+.campaign-generation-settings{display:grid;grid-template-columns:minmax(170px,.7fr) minmax(190px,1fr);align-items:center;gap:10px 16px;margin:15px 0;padding:13px;border:1px solid #e7ece7;border-radius:9px;background:#fbfdfb}
+.campaign-generation-settings>label:first-child{display:grid;gap:6px;color:#536158;font-size:12px;font-weight:700}
+.auto-approve-option{display:flex;align-items:center;gap:8px;color:#536158;font-size:12px;font-weight:600}
+.auto-approve-option input{accent-color:#1d755c}
+.campaign-generation-settings>p{grid-column:1/-1;margin:0;color:#8d9990;font-size:12px;line-height:1.45}
+.generation-progress{position:relative;display:flex;align-items:center;gap:11px;overflow:hidden;margin:12px 0;padding:12px;border:1px solid #cfe3d3;border-radius:9px;background:#f2f8f2;color:#39805c}
+.generation-progress>div{display:grid;gap:3px}
+.generation-progress b{color:#435c49;font-size:12px}
+.generation-progress span:not(.generation-progress-bar){color:#718579;font-size:12px}
+.generation-progress-bar{position:absolute;right:0;bottom:0;left:0;height:3px;background:linear-gradient(90deg,transparent,#63a87b,transparent);animation:progress-travel 1.6s ease-in-out infinite}
+.generation-status{display:block;margin-top:8px;color:#64806c;font-size:12px;line-height:1.4}
+.generation-status.failed{color:#ad4f4f}
+@keyframes progress-travel{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+@media(max-width:520px){.asset-page-select{grid-template-columns:1fr;gap:6px}.campaign-generation-settings{grid-template-columns:1fr}.campaign-generation-settings>p{grid-column:auto}.campaign-actions{width:100%;justify-content:flex-start}.campaign-actions .button{flex:1 1 43%;white-space:normal}.asset-grid{grid-template-columns:1fr}.generation-progress{align-items:flex-start}}
