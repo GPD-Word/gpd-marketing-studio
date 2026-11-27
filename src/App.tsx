@@ -1182,27 +1182,39 @@ export default function App() {
                 <div className="campaign-list">{campaigns.map((item) => {
                   const generation = generationJobs.find((job) => job.campaign_id === item.id);
                   return <article className="campaign-row" key={item.id}>
-                    <span className="campaign-icon"><Target size={17} /></span>
-                    <div className="campaign-main">
-                      <div className="campaign-title-line"><b>{item.name}</b>{item.campaign_code && <span>CODE {item.campaign_code}</span>}</div><p>{item.objective}</p>
+                    <div className="campaign-card-head">
+                      <div className="campaign-identity">
+                        <span className="campaign-icon"><Target size={17} /></span>
+                        <div className="campaign-main">
+                          <div className="campaign-title-line"><b>{item.name}</b>{item.campaign_code && <span>CODE {item.campaign_code}</span>}</div>
+                          <p>{item.objective}</p>
+                        </div>
+                      </div>
+                      <div className="campaign-date"><CalendarDays size={14} aria-hidden="true" /><span><time dateTime={item.starts_at}>{new Date(item.starts_at).toLocaleDateString()}</time> – <time dateTime={item.ends_at}>{new Date(item.ends_at).toLocaleDateString()}</time></span></div>
+                    </div>
+                    <div className="campaign-details">
                       <div className="tag-row">{item.strategies.map((strategy) => <span className="tag" key={strategy}>{strategy.replace("-", " ")}</span>)}</div>
                       {generation && <small className={`generation-status ${generation.status === "failed" ? "failed" : ""}`}>
-                        {generation.status === "active"
+                        <Clock3 size={13} aria-hidden="true" />
+                        <span>{generation.status === "active"
                           ? `Rolling generation · batch ${generation.generated_batches} · next run ${new Date(generation.next_run_at).toLocaleString()}`
                           : generation.status === "processing"
                             ? "Generating the next campaign batch…"
                             : generation.status === "failed"
                               ? `Rolling generation paused: ${generation.last_error || "The last batch failed."}`
-                              : `Campaign generation ${generation.status}`}
+                              : `Campaign generation ${generation.status}`}</span>
                       </small>}
                     </div>
-                    <div className="campaign-date">{new Date(item.starts_at).toLocaleDateString()} – {new Date(item.ends_at).toLocaleDateString()}</div>
                     <div className="campaign-actions">
-                      <button className="button primary" disabled={busy || !item.account_ids.length} onClick={() => generateCampaignPlan(item)}><Sparkles size={13} /> Generate 7 days</button>
-                      <button className="button secondary" disabled={busy || !item.account_ids.length || generation?.status === "active" || generation?.status === "processing" || generation?.status === "completed"} onClick={() => generation?.status === "failed" ? resumeCampaignGeneration(item) : generateCampaignPlan(item, true)}><CalendarDays size={13} /> {generation?.status === "failed" ? "Resume rolling" : generation?.status === "active" ? "Rolling active" : generation?.status === "completed" ? "Rolling complete" : "Generate campaign"}</button>
-                      <button className="button secondary" onClick={() => openCampaignPosts(item)}><Check size={13} /> Review posts</button>
-                      <button className="button secondary" onClick={() => setMediaCampaign(item)}><Video size={14} /> Media studio</button>
-                      <button className="button secondary" onClick={() => openScheduleForm(item)} disabled={!item.account_ids.length}><Plus size={13} /> Create post</button>
+                      <div className="campaign-action-group campaign-plan-actions" role="group" aria-label={`${item.name} campaign generation`}>
+                        <button className="button primary" disabled={busy || !item.account_ids.length} onClick={() => generateCampaignPlan(item)}><Sparkles size={13} /> Generate 7 days</button>
+                        <button className="button secondary" disabled={busy || !item.account_ids.length || generation?.status === "active" || generation?.status === "processing" || generation?.status === "completed"} onClick={() => generation?.status === "failed" ? resumeCampaignGeneration(item) : generateCampaignPlan(item, true)}><CalendarDays size={13} /> {generation?.status === "failed" ? "Resume rolling" : generation?.status === "active" ? "Rolling active" : generation?.status === "completed" ? "Rolling complete" : "Generate campaign"}</button>
+                      </div>
+                      <div className="campaign-action-group campaign-utility-actions" role="group" aria-label={`${item.name} campaign tools`}>
+                        <button className="button secondary" onClick={() => openCampaignPosts(item)}><Check size={13} /> Review posts</button>
+                        <button className="button secondary" onClick={() => setMediaCampaign(item)}><Video size={14} /> Media studio</button>
+                        <button className="button secondary" onClick={() => openScheduleForm(item)} disabled={!item.account_ids.length}><Plus size={13} /> Create post</button>
+                      </div>
                     </div>
                   </article>;
                 })}</div>
