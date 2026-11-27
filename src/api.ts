@@ -33,6 +33,7 @@ export interface AIProviderConfig {
 
 export interface Campaign {
   id: string;
+  campaign_code: string | null;
   name: string;
   objective: string;
   strategies: string[];
@@ -87,6 +88,18 @@ export interface MarketingAsset {
   analysis_status: string;
   download_url: string;
   created_at: string;
+}
+
+export interface FacebookGalleryPhoto {
+  id: string;
+  name: string | null;
+  image_url: string;
+  created_time: string | null;
+}
+
+export interface FacebookGalleryPage {
+  photos: FacebookGalleryPhoto[];
+  next_cursor: string | null;
 }
 
 export interface CampaignGenerationJob {

@@ -13,6 +13,7 @@ import {
   type CampaignGeography,
   type CloudinaryUploadIntent,
   type CloudinaryUploadResult,
+  type FacebookGalleryPage,
   type LLMProvider,
   type MarketingAsset,
   type MediaGenerationJob,
@@ -135,7 +136,9 @@ export default function App() {
   const [aiAccountId, setAiAccountId] = useState<string | null>(null);
   const [aiProviderRows, setAIProviderRows] = useState<ProviderFormRow[]>([]);
   const [savedAIProviders, setSavedAIProviders] = useState<AIProviderConfig[]>([]);
-  const [assetFile, setAssetFile] = useState<File | null>(null);
+  const [assetFiles, setAssetFiles] = useState<File[]>([]);
+  const [assetProgress, setAssetProgress] = useState("");
+  const assetInputRef = useRef<HTMLInputElement | null>(null);
   const [assetUrl, setAssetUrl] = useState("");
   const [assetAccountId, setAssetAccountId] = useState("");
   const [assetAssignmentAccounts, setAssetAssignmentAccounts] = useState<Record<string, string>>({});
@@ -719,43 +722,82 @@ export default function App() {
 
   async function uploadAsset(event: React.FormEvent) {
     event.preventDefault();
-    if (!assetFile || !assetAccountId) {
+    if (!assetFiles.length || !assetAccountId) {
       setError("Choose the page that owns this media before uploading.");
       return;
     }
+    const files = assetFiles;
+    let uploadedCount = 0;
+    const failures: string[] = [];
     setBusy(true);
     setError("");
     setMessage("");
     try {
-      const intent = await api<CloudinaryUploadIntent>("/api/assets/upload-signature", token, {
-        method: "POST",
-        body: JSON.stringify({
-          account_id: assetAccountId,
-          media_type: assetFile.type,
-          original_name: assetFile.name,
-          file_size: assetFile.size,
-        }),
-      });
-      const uploaded = await uploadToCloudinary(assetFile, intent);
-      await api<MarketingAsset>("/api/assets/complete", token, {
-        method: "POST",
-        body: JSON.stringify({
-          public_id: uploaded.public_id,
-          version: uploaded.version,
-          signature: uploaded.signature,
-          resource_type: uploaded.resource_type,
-          original_name: assetFile.name,
-          account_id: assetAccountId,
-        }),
-      });
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        setAssetProgress(`Uploading ${index + 1} of ${files.length}: ${file.name}`);
+        try {
+          const intent = await api<CloudinaryUploadIntent>("/api/assets/upload-signature", token, {
+            method: "POST",
+            body: JSON.stringify({
+              account_id: assetAccountId,
+              media_type: file.type,
+              original_name: file.name,
+              file_size: file.size,
+            }),
+          });
+          const uploaded = await uploadToCloudinary(file, intent);
+          await api<MarketingAsset>("/api/assets/complete", token, {
+            method: "POST",
+            body: JSON.stringify({
+              public_id: uploaded.public_id,
+              version: uploaded.version,
+              signature: uploaded.signature,
+              resource_type: uploaded.resource_type,
+              original_name: file.name,
+              account_id: assetAccountId,
+            }),
+          });
+          uploadedCount += 1;
+        } catch (cause) {
+          failures.push(`${file.name}: ${(cause as Error).message}`);
+        }
+      }
       await refreshData(token);
-      setAssetFile(null);
-      setMessage("Media uploaded directly to Cloudinary and analyzed by the Hugging Face inference service.");
+      setAssetFiles([]);
+      if (assetInputRef.current) assetInputRef.current.value = "";
+      if (failures.length) {
+        const failedNames = failures.slice(0, 3).join("; ");
+        const moreFailures = failures.length > 3 ? `; and ${failures.length - 3} more` : "";
+        setError(`Uploaded and analyzed ${uploadedCount} of ${files.length} files. ${failures.length} failed: ${failedNames}${moreFailures}`);
+      } else {
+        setMessage(`Uploaded and analyzed ${uploadedCount} media file${uploadedCount === 1 ? "" : "s"} with Cloudinary and the Hugging Face inference service.`);
+      }
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
+      setAssetProgress("");
       setBusy(false);
     }
+  }
+
+  async function importMediaFromUrl(accountId: string, url: string, originalName: string) {
+    const intent = await api<CloudinaryUploadIntent>("/api/assets/from-url", token, {
+      method: "POST",
+      body: JSON.stringify({ account_id: accountId, url }),
+    });
+    const uploaded = await uploadToCloudinary(url, intent);
+    return api<MarketingAsset>("/api/assets/complete", token, {
+      method: "POST",
+      body: JSON.stringify({
+        public_id: uploaded.public_id,
+        version: uploaded.version,
+        signature: uploaded.signature,
+        resource_type: uploaded.resource_type,
+        original_name: originalName,
+        account_id: accountId,
+      }),
+    });
   }
 
   async function importAssetFromUrl(event: React.FormEvent) {
@@ -768,23 +810,8 @@ export default function App() {
     setError("");
     setMessage("");
     try {
-      const intent = await api<CloudinaryUploadIntent>("/api/assets/from-url", token, {
-        method: "POST",
-        body: JSON.stringify({ account_id: assetAccountId, url: assetUrl }),
-      });
-      const uploaded = await uploadToCloudinary(assetUrl, intent);
       const originalName = decodeURIComponent(new URL(assetUrl).pathname.split("/").pop() || "external-media");
-      await api<MarketingAsset>("/api/assets/complete", token, {
-        method: "POST",
-        body: JSON.stringify({
-          public_id: uploaded.public_id,
-          version: uploaded.version,
-          signature: uploaded.signature,
-          resource_type: uploaded.resource_type,
-          original_name: originalName,
-          account_id: assetAccountId,
-        }),
-      });
+      await importMediaFromUrl(assetAccountId, assetUrl, originalName);
       await refreshData(token);
       setAssetUrl("");
       setMessage("Linked media uploaded to Cloudinary and analyzed by the Hugging Face inference service.");
@@ -793,6 +820,90 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function importFacebookGallery() {
+    const pageAccount = accounts.find((item) => item.id === assetAccountId);
+    if (!pageAccount || pageAccount.platform !== "facebook") {
+      setError("Choose a Facebook Page before importing its photo gallery.");
+      return;
+    }
+    if (!window.confirm(`Import all uploaded photos from ${pageAccount.display_name}? This can take time. Photos already imported to this page will be skipped.`)) return;
+
+    const knownNames = new Set(
+      assets
+        .filter((item) => item.account_id === pageAccount.id)
+        .map((item) => item.original_name),
+    );
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+    let pageNumber = 1;
+    let photoCount = 0;
+    let importedCount = 0;
+    let skippedCount = 0;
+    const failures: string[] = [];
+    let operationError = "";
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      do {
+        setAssetProgress(`Loading Facebook Page photos · page ${pageNumber}`);
+        const query = new URLSearchParams({ limit: "50" });
+        if (cursor) query.set("after", cursor);
+        const page = await api<FacebookGalleryPage>(
+          `/api/accounts/${pageAccount.id}/facebook-gallery?${query.toString()}`,
+          token,
+        );
+        for (const photo of page.photos) {
+          photoCount += 1;
+          const originalName = `facebook-photo-${photo.id}.jpg`;
+          if (knownNames.has(originalName)) {
+            skippedCount += 1;
+            continue;
+          }
+          setAssetProgress(`Importing Page photo ${photoCount}${page.next_cursor ? " · more photos available" : ""}`);
+          try {
+            await importMediaFromUrl(pageAccount.id, photo.image_url, originalName);
+            knownNames.add(originalName);
+            importedCount += 1;
+          } catch (cause) {
+            failures.push(`Photo ${photo.id}: ${(cause as Error).message}`);
+          }
+        }
+        cursor = page.next_cursor ?? undefined;
+        if (cursor && seenCursors.has(cursor)) {
+          operationError = "Facebook returned a repeated gallery page cursor, so the import stopped to avoid looping.";
+          break;
+        }
+        if (cursor) seenCursors.add(cursor);
+        pageNumber += 1;
+      } while (cursor);
+    } catch (cause) {
+      operationError = (cause as Error).message;
+    }
+
+    if (importedCount) {
+      try {
+        await refreshData(token);
+      } catch (cause) {
+        operationError = [operationError, `The import finished but the asset library could not refresh: ${(cause as Error).message}`]
+          .filter(Boolean)
+          .join(" ");
+      }
+    }
+    const summary = `Imported ${importedCount} photo${importedCount === 1 ? "" : "s"}; skipped ${skippedCount} already in the library.`;
+    if (operationError || failures.length) {
+      const failedNames = failures.slice(0, 3).join("; ");
+      const moreFailures = failures.length > 3 ? `; and ${failures.length - 3} more` : "";
+      setError(`${operationError ? `${operationError} ` : ""}${summary}${failures.length ? ` ${failures.length} photos failed: ${failedNames}${moreFailures}` : ""}`);
+    } else if (photoCount === 0) {
+      setMessage("Facebook did not return any uploaded Page photos.");
+    } else {
+      setMessage(summary);
+    }
+    setAssetProgress("");
+    setBusy(false);
   }
 
   async function assignAssetToAccount(asset: MarketingAsset) {
@@ -1035,25 +1146,31 @@ export default function App() {
               <div className="section-buttons">
                 {(view === "channels" || view === "overview") && <button className="button secondary" onClick={() => setShowAccountForm(true)}><Plus size={16} /> Connect a channel</button>}
                 {(view === "campaigns" || view === "overview") && <button className="button primary" onClick={() => setShowCampaignForm(true)}><Sparkles size={15} /> New campaign</button>}
-                {view === "assets" && <button className="button primary" onClick={() => document.getElementById("asset-file-input")?.click()}><ImagePlus size={15} /> Upload image</button>}
+                {view === "assets" && <button className="button primary" onClick={() => assetInputRef.current?.click()}><ImagePlus size={15} /> Add media</button>}
               </div>
             </div>
 
             {view === "campaigns" ? (
               campaigns.length ? <>
-                <div className="campaign-generation-settings">
-                  <label>Posts per page, per day
-                    <select value={postsPerDay} onChange={(event) => setPostsPerDay(Number(event.target.value))}>
-                      <option value={1}>1 post</option>
-                      <option value={2}>2 posts</option>
-                      <option value={3}>3 posts</option>
-                    </select>
-                  </label>
-                  <label className="auto-approve-option">
-                    <input type="checkbox" checked={autoApprovePosts} onChange={(event) => setAutoApprovePosts(event.target.checked)} />
-                    <span>Auto-approve generated posts</span>
-                  </label>
-                  <p>Auto-approved posts can publish automatically when their scheduled time arrives. Turn this off to review every post first.</p>
+                <div className="campaign-generation-panel">
+                  <div className="campaign-generation-heading">
+                    <div><b>Campaign automation</b><span>Set the daily publishing rhythm and review mode for generated plans.</span></div>
+                    <span className="automation-badge"><Clock3 size={13} /> Daily schedule</span>
+                  </div>
+                  <div className="campaign-generation-settings">
+                    <label>Posts per page, per day
+                      <select value={postsPerDay} onChange={(event) => setPostsPerDay(Number(event.target.value))}>
+                        <option value={1}>1 post</option>
+                        <option value={2}>2 posts</option>
+                        <option value={3}>3 posts</option>
+                      </select>
+                    </label>
+                    <label className={`auto-approve-option ${autoApprovePosts ? "enabled" : ""}`}>
+                      <span className="auto-approve-copy"><b>Automatic approval</b><small>{autoApprovePosts ? "Posts can publish at their scheduled time." : "Review each generated post before publishing."}</small></span>
+                      <input type="checkbox" checked={autoApprovePosts} onChange={(event) => setAutoApprovePosts(event.target.checked)} />
+                    </label>
+                    <p><LockKeyhole size={13} /> These settings apply to both 7-day plans and rolling campaign generation.</p>
+                  </div>
                 </div>
                 {planningCampaignId && (
                   <div className="generation-progress" role="status" aria-live="polite" aria-busy="true">
@@ -1067,7 +1184,7 @@ export default function App() {
                   return <article className="campaign-row" key={item.id}>
                     <span className="campaign-icon"><Target size={17} /></span>
                     <div className="campaign-main">
-                      <b>{item.name}</b><p>{item.objective}</p>
+                      <div className="campaign-title-line"><b>{item.name}</b>{item.campaign_code && <span>CODE {item.campaign_code}</span>}</div><p>{item.objective}</p>
                       <div className="tag-row">{item.strategies.map((strategy) => <span className="tag" key={strategy}>{strategy.replace("-", " ")}</span>)}</div>
                       {generation && <small className={`generation-status ${generation.status === "failed" ? "failed" : ""}`}>
                         {generation.status === "active"
@@ -1081,11 +1198,11 @@ export default function App() {
                     </div>
                     <div className="campaign-date">{new Date(item.starts_at).toLocaleDateString()} – {new Date(item.ends_at).toLocaleDateString()}</div>
                     <div className="campaign-actions">
-                      <button className="button secondary" disabled={busy || !item.account_ids.length} onClick={() => generateCampaignPlan(item)}>Generate 7 days</button>
-                      <button className="button secondary" disabled={busy || !item.account_ids.length || generation?.status === "active" || generation?.status === "processing" || generation?.status === "completed"} onClick={() => generation?.status === "failed" ? resumeCampaignGeneration(item) : generateCampaignPlan(item, true)}>{generation?.status === "failed" ? "Resume rolling" : generation?.status === "active" ? "Rolling active" : generation?.status === "completed" ? "Rolling complete" : "Generate campaign"}</button>
-                      <button className="button secondary" onClick={() => openCampaignPosts(item)}>Review posts</button>
+                      <button className="button primary" disabled={busy || !item.account_ids.length} onClick={() => generateCampaignPlan(item)}><Sparkles size={13} /> Generate 7 days</button>
+                      <button className="button secondary" disabled={busy || !item.account_ids.length || generation?.status === "active" || generation?.status === "processing" || generation?.status === "completed"} onClick={() => generation?.status === "failed" ? resumeCampaignGeneration(item) : generateCampaignPlan(item, true)}><CalendarDays size={13} /> {generation?.status === "failed" ? "Resume rolling" : generation?.status === "active" ? "Rolling active" : generation?.status === "completed" ? "Rolling complete" : "Generate campaign"}</button>
+                      <button className="button secondary" onClick={() => openCampaignPosts(item)}><Check size={13} /> Review posts</button>
                       <button className="button secondary" onClick={() => setMediaCampaign(item)}><Video size={14} /> Media studio</button>
-                      <button className="button secondary" onClick={() => openScheduleForm(item)} disabled={!item.account_ids.length}>Create post</button>
+                      <button className="button secondary" onClick={() => openScheduleForm(item)} disabled={!item.account_ids.length}><Plus size={13} /> Create post</button>
                     </div>
                   </article>;
                 })}</div>
@@ -1095,24 +1212,31 @@ export default function App() {
             ) : view === "assets" ? (
               <div className="asset-library">
                 <label className="asset-page-select" htmlFor="asset-page-select">Save new media under
-                  <select id="asset-page-select" required value={assetAccountId} onChange={(event) => setAssetAccountId(event.target.value)} disabled={!accounts.length}>
+                  <select id="asset-page-select" required value={assetAccountId} onChange={(event) => setAssetAccountId(event.target.value)} disabled={!accounts.length || busy}>
                     <option value="">Choose a page</option>
                     {accounts.map((channel) => <option value={channel.id} key={channel.id}>{channel.display_name} · {channel.platform}</option>)}
                   </select>
                 </label>
                 {!accounts.length && <p className="form-hint">Connect a social channel before uploading assets so each file has a clear page owner.</p>}
                 <form className="asset-upload" onSubmit={uploadAsset}>
-                  <input id="asset-file-input" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime,audio/mpeg,audio/wav,audio/mp4,audio/ogg,audio/flac" onChange={(event) => setAssetFile(event.target.files?.[0] ?? null)} />
+                  <input ref={assetInputRef} id="asset-file-input" type="file" multiple accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime,audio/mpeg,audio/wav,audio/mp4,audio/ogg,audio/flac" onChange={(event) => setAssetFiles(Array.from(event.target.files ?? []))} />
                   <div className="asset-upload-icon"><ImagePlus size={19} /></div>
-                  <b>{assetFile ? assetFile.name : "Choose an image, video, or audio file"}</b>
+                  <b>{assetFiles.length ? `${assetFiles.length} file${assetFiles.length === 1 ? "" : "s"} selected` : "Choose images, videos, or audio files"}</b>
+                  {assetFiles.length > 0 && <small className="asset-file-list">{assetFiles.slice(0, 4).map((file) => file.name).join(" · ")}{assetFiles.length > 4 ? ` · and ${assetFiles.length - 4} more` : ""}</small>}
                   <small>JPEG, PNG, WebP, MP4, WebM, MOV, MP3, WAV, M4A, OGG or FLAC · images 12 MB, audio 25 MB, video 100 MB</small>
-                  <div className="asset-upload-actions"><button type="button" className="button secondary" disabled={!accounts.length} onClick={() => document.getElementById("asset-file-input")?.click()}><FileImage size={14} /> Choose file</button><button type="submit" className="button primary" disabled={!assetFile || !assetAccountId || busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />} Upload &amp; analyze</button></div>
+                  <div className="asset-upload-actions"><button type="button" className="button secondary" disabled={!accounts.length || busy} onClick={() => assetInputRef.current?.click()}><FileImage size={14} /> Choose files</button><button type="submit" className="button primary" disabled={!assetFiles.length || !assetAccountId || busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />} Upload &amp; analyze</button></div>
                 </form>
+                {assetProgress && <div className="asset-operation-progress" role="status" aria-live="polite" aria-busy="true"><LoaderCircle className="spin" size={15} /><span>{assetProgress}</span><i aria-hidden="true" /></div>}
                 <form className="asset-url-import" onSubmit={importAssetFromUrl}>
                   <label htmlFor="asset-url-input">Or import a direct media link</label>
                   <div><input id="asset-url-input" type="url" required inputMode="url" placeholder="https://example.com/campaign-image.jpg" value={assetUrl} onChange={(event) => setAssetUrl(event.target.value)} /><button className="button secondary" type="submit" disabled={!assetUrl || !assetAccountId || busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <ArrowRight size={14} />} Import URL</button></div>
                   <small>Public HTTPS direct-media links · images 12 MB, audio 25 MB, video 100 MB · no redirects</small>
                 </form>
+                {accounts.find((channel) => channel.id === assetAccountId)?.platform === "facebook" && <section className="facebook-gallery-import">
+                  <div><b>Facebook Page photo gallery</b><p>Import uploaded Page photos to this channel's library. Existing photos are skipped; this can take a while for large galleries.</p></div>
+                  <button className="button secondary" type="button" disabled={busy} onClick={importFacebookGallery}>{busy ? <LoaderCircle className="spin" size={14} /> : <ImagePlus size={14} />} Import Page gallery</button>
+                  <small>Requires a Facebook Page token that can read Page photos.</small>
+                </section>}
                 {assets.length ? <>
                   {accounts.map((channel) => {
                     const pageAssets = assets.filter((item) => item.account_id === channel.id);
@@ -1338,6 +1462,7 @@ function CampaignMediaStudio({
   const onAssetsUpdatedRef = useRef(onAssetsUpdated);
   onAssetsUpdatedRef.current = onAssetsUpdated;
 
+  const campaignReference = campaign.campaign_code ?? campaign.id;
   const accountAssets = assets.filter((asset) => asset.account_id === accountId);
   const imageAssets = accountAssets.filter((asset) => asset.media_type.startsWith("image/"));
   const audioAssets = accountAssets.filter((asset) => asset.media_type.startsWith("audio/"));
@@ -1354,7 +1479,7 @@ function CampaignMediaStudio({
     async function refreshJobs() {
       try {
         const response = await api<{ jobs: MediaGenerationJob[] }>(
-          `/api/campaigns/${campaign.id}/media-jobs`,
+          `/api/campaigns/${campaignReference}/media-jobs`,
           token,
         );
         if (!active) return;
@@ -1374,7 +1499,7 @@ function CampaignMediaStudio({
       active = false;
       window.clearInterval(timer);
     };
-  }, [campaign.id, token]);
+  }, [campaign.id, campaignReference, token]);
 
   async function suggestNarration() {
     const channel = accounts.find((item) => item.id === accountId);
@@ -1409,7 +1534,7 @@ function CampaignMediaStudio({
     setBusy(true);
     setError("");
     try {
-      const job = await api<MediaGenerationJob>(`/api/campaigns/${campaign.id}/media-jobs`, token, {
+      const job = await api<MediaGenerationJob>(`/api/campaigns/${campaignReference}/media-jobs`, token, {
         method: "POST",
         body: JSON.stringify({
           account_id: accountId,
@@ -1522,7 +1647,23 @@ function languageName(code: string): string {
 function ChannelCard({ account, onRemove, onAIConfigure, onValidate, onProfile, onTikTokSetup }: { account: SocialAccount; onRemove: (id: string) => void; onAIConfigure: (id: string) => void; onValidate: (id: string) => void; onProfile: (account: SocialAccount) => void; onTikTokSetup: (account: SocialAccount) => void }) {
   const channel = platforms.find((item) => item.id === account.platform) ?? platforms[0];
   const Icon = channel.icon;
-  return <article className="channel-card"><div className={`platform-icon ${account.platform}`}><Icon size={18} /></div><div className="channel-card-title"><b>{account.display_name}</b><small>{channel.label} · ID {account.external_id}</small></div><span className="connected"><i /> {account.platform === "tiktok" ? "Browser login" : account.credentials_verified_at ? "Verified" : "Unverified"}</span><div className="channel-actions"><button className="text-button" onClick={() => onProfile(account)}>Page profile</button>{account.platform === "tiktok" ? <button className="text-button" onClick={() => onTikTokSetup(account)}>TikTok login</button> : <button className="text-button" onClick={() => onValidate(account.id)}>Verify platform</button>}<button className="text-button" onClick={() => onAIConfigure(account.id)}>AI provider keys</button><button className="text-button" onClick={() => onRemove(account.id)}>Disconnect</button></div></article>;
+  const verified = Boolean(account.credentials_verified_at);
+  return <article className={`channel-card channel-card-${account.platform}`}>
+    <header className="channel-card-head">
+      <span className={`platform-icon ${account.platform}`}><Icon size={18} /></span>
+      <div className="channel-card-title"><b>{account.display_name}</b><small>{channel.label} channel</small></div>
+      <span className={`connected ${account.platform === "tiktok" || verified ? "verified" : "unverified"}`}><i />{account.platform === "tiktok" ? "Browser publishing" : verified ? "Access verified" : "Needs verification"}</span>
+    </header>
+    <div className="channel-card-id"><span>Platform ID</span><code>{account.external_id}</code></div>
+    <div className="channel-actions" aria-label={`${channel.label} channel actions`}>
+      <button type="button" className="channel-action-button" onClick={() => onProfile(account)}><Settings2 size={14} />Page profile</button>
+      {account.platform === "tiktok"
+        ? <button type="button" className="channel-action-button" onClick={() => onTikTokSetup(account)}><LogOut size={14} />TikTok login</button>
+        : <button type="button" className="channel-action-button" onClick={() => onValidate(account.id)}><Check size={14} />Verify access</button>}
+      <button type="button" className="channel-action-button" onClick={() => onAIConfigure(account.id)}><Sparkles size={14} />AI settings</button>
+      <button type="button" className="channel-action-button danger" onClick={() => onRemove(account.id)}><LogOut size={14} />Disconnect</button>
+    </div>
+  </article>;
 }
 
 function ChannelMini({ account }: { account: SocialAccount }) {
